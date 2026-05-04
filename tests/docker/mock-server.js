@@ -26,7 +26,13 @@ async function main() {
       toolCalls: [
         {
           name: "aft_outline",
-          arguments: JSON.stringify({ directory: "src" }),
+          // v0.18.x renamed the four mutually exclusive aft_outline params
+          // (filePath / files / directory / url) into a single `target` that
+          // auto-detects file vs directory vs URL via stat() / scheme check.
+          // Keeping the old `directory` param here would silently fail with
+          // "unsupported param" — the agent would receive an error, never
+          // make a follow-up tool call, and the bridge would never spawn.
+          arguments: JSON.stringify({ target: "src" }),
         },
       ],
     },
