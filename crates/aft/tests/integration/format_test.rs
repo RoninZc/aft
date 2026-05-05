@@ -22,27 +22,53 @@ fn is_on_path(binary: &str) -> bool {
         .is_ok()
 }
 
-#[cfg(unix)]
+/// Install a stub `tsc` checker that prints a fixed TS2322 error and exits 2.
+/// On Unix the stub is a `tsc` shell script with the executable bit set.
+/// On Windows it's a `tsc.cmd` batch file (Windows resolves both `tsc` and
+/// `tsc.cmd` against PATH via PATHEXT). Either way the resolver finds it
+/// when `<dir>/node_modules/.bin` is prepended to PATH.
 fn install_tsc_stub(dir: &std::path::Path, file_name: &str) {
-    use std::os::unix::fs::PermissionsExt;
-
     let bin_dir = dir.join("node_modules").join(".bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let stub = bin_dir.join("tsc");
-    fs::write(
-        &stub,
-        format!(
-            "#!/bin/sh\nprintf '%s(1,7): error TS2322: Type \\\"string\\\" is not assignable to type \\\"number\\\".\\n' '{}/{file_name}'\nexit 2\n",
-            dir.display()
-        ),
-    )
-    .unwrap();
-    let mut perms = fs::metadata(&stub).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&stub, perms).unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let stub = bin_dir.join("tsc");
+        fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nprintf '%s(1,7): error TS2322: Type \\\"string\\\" is not assignable to type \\\"number\\\".\\n' '{}/{file_name}'\nexit 2\n",
+                dir.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&stub).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&stub, perms).unwrap();
+    }
+
+    #[cfg(windows)]
+    {
+        // Batch file: @echo off + a single echo with the canonical error
+        // format. Path uses backslashes per Windows convention so the
+        // resolver-printed location matches the file we wrote.
+        let stub = bin_dir.join("tsc.cmd");
+        fs::write(
+            &stub,
+            format!(
+                "@echo off\r\necho {}\\{file_name}(1,7): error TS2322: Type \"string\" is not assignable to type \"number\".\r\nexit /b 2\r\n",
+                dir.display()
+            ),
+        )
+        .unwrap();
+    }
 }
 
-#[cfg(unix)]
+/// Prepend `<dir>/node_modules/.bin` to a PATH-style env var so a stub
+/// installed via `install_tsc_stub` resolves before any real `tsc` on the
+/// runner. Cross-platform: `std::env::split_paths` and `join_paths` use
+/// `:` on Unix and `;` on Windows automatically.
 fn prepend_path(existing_path: &std::ffi::OsStr, dir: &std::path::Path) -> std::ffi::OsString {
     let mut paths = std::env::split_paths(existing_path).collect::<Vec<_>>();
     paths.insert(0, dir.join("node_modules").join(".bin"));

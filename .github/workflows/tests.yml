@@ -68,7 +68,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Build aft-bridge dist (workspace consumers depend on it)
-        run: bun --filter "@cortexkit/aft-bridge" run build
+        run: bun run --cwd packages/aft-bridge build
 
       - name: Cargo build (debug — needed by plugin e2e tests)
         run: cargo build -p agent-file-tools
@@ -179,11 +179,11 @@ jobs:
       - name: Install workspace deps + build aft-bridge
         run: |
           bun install --frozen-lockfile
-          bun --filter "@cortexkit/aft-bridge" run build
+          bun run --cwd packages/aft-bridge build
         shell: pwsh
 
       - name: Build OpenCode plugin dist
-        run: bun --filter "@cortexkit/aft-opencode" run build
+        run: bun run --cwd packages/opencode-plugin build
         shell: pwsh
 
       - name: Run Windows E2E suite

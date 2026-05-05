@@ -5,7 +5,9 @@
 //! Provides `AftProcess` — a handle to a running aft binary with piped I/O —
 //! and `fixture_path` for resolving test fixture files.
 
-use std::io::{BufRead, BufReader, ErrorKind, Write};
+#[cfg(unix)]
+use std::io::ErrorKind;
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
