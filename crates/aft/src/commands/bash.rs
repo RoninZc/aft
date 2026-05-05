@@ -522,9 +522,13 @@ fn bash_output_dir(ctx: &AppContext) -> PathBuf {
     if let Some(dir) = ctx.config().storage_dir.clone() {
         return dir.join("bash-output");
     }
+    // Fallback to user home (`HOME` on Unix, `USERPROFILE` on Windows).
+    // If neither is set, use a temp directory; never fall back to `"."`
+    // because relative paths break bash output handoff once cwd shifts.
     let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+        .unwrap_or_else(std::env::temp_dir);
     home.join(".cache").join("aft").join("bash-output")
 }
 

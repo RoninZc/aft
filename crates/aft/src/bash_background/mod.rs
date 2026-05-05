@@ -106,8 +106,17 @@ pub fn storage_dir(configured: Option<&std::path::Path>) -> PathBuf {
     if let Some(dir) = std::env::var_os("AFT_CACHE_DIR") {
         return PathBuf::from(dir).join("aft");
     }
+    // Fallback to the user's home directory. On Unix this is `$HOME`; on
+    // Windows `HOME` is typically unset, so fall back to `USERPROFILE`
+    // (which is always set in interactive sessions and in the env that
+    // OpenCode/Pi pass through to plugin processes). If both are missing
+    // (rare — embedded contexts, broken shells), fall back to a temp
+    // directory rather than `"."` — a relative path makes bg-bash wrapper
+    // commands like `move /Y .\.cache\aft\... ...` fail with "system
+    // cannot find the path specified" once the working directory shifts.
     let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+        .unwrap_or_else(std::env::temp_dir);
     home.join(".cache").join("aft")
 }

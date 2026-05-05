@@ -78,17 +78,34 @@ impl WindowsShell {
     /// For foreground bash, callers should use [`Self::command`] instead;
     /// `/V:ON` would change the semantics of user commands containing `!`
     /// (which would otherwise be passed through literally to the user).
+    // No longer called by production bg-bash (which writes the wrapper
+    // to a temp file and invokes via `-File` / `cmd /C path`), but kept
+    // for tests that exercise the shell-arg shape directly.
+    #[allow(dead_code)]
     pub(crate) fn bg_command(self, wrapper: &str) -> Command {
         let mut cmd = Command::new(self.binary());
+        // PowerShell variants accept the wrapper string directly via
+        // `-Command`; the shell's `-Command` parser is generally happy
+        // with embedded quotes when the script doesn't contain literal
+        // `"` (we use only single quotes in the PS wrapper for that
+        // reason — see `wrapper_script` for `Pwsh|Powershell`).
+        //
+        // For cmd.exe the wrapper contains `cmd_quote`-quoted paths
+        // which CAN survive cmd's /C parser, but only if we add `/S`
+        // to enable simple-quote-stripping mode. Even with /S the
+        // interaction with Rust's std-lib argument quoting is fragile,
+        // so we rely on `args()` for cmd and live with the constraints.
+        //
+        // `/V:ON` enables `!ERRORLEVEL!` delayed expansion for cmd;
+        // without it, `%ERRORLEVEL%` would be parse-time-expanded to
+        // cmd's startup value, recording a stale exit code. `/D` skips
+        // AutoRun macros; `/S` enables simple quote-stripping.
         match self {
             WindowsShell::Pwsh | WindowsShell::Powershell => {
                 cmd.args(self.args(wrapper));
             }
             WindowsShell::Cmd => {
-                // /V:ON enables delayed expansion (!VAR!) for this cmd
-                // invocation only — does not pollute the user command,
-                // which sees its own subshell semantics anyway.
-                cmd.args(["/V:ON", "/D", "/C", wrapper]);
+                cmd.args(["/V:ON", "/D", "/S", "/C", wrapper]);
             }
         }
         cmd
@@ -101,14 +118,27 @@ impl WindowsShell {
         match self {
             WindowsShell::Pwsh | WindowsShell::Powershell => {
                 let exit_path = powershell_single_quote(&exit_path.display().to_string());
-                let binary = powershell_single_quote(self.binary());
                 let command = powershell_single_quote(command);
+                // The wrapper itself runs as a PowerShell script (invoked
+                // via `pwsh -File <path>` by `detached_shell_command_for`),
+                // so we execute the user command directly with `Invoke-Expression`
+                // instead of nesting another shell. Earlier versions wrapped
+                // the user command in an inner `& 'pwsh.exe' -Command ...`
+                // which caused PS-on-PS recursion that silently produced
+                // empty output on Windows 11 (likely a console-host issue
+                // with nested non-interactive pwsh sessions).
+                //
+                // CRITICAL: this script must contain NO literal double-quote
+                // characters. Inner `"` would break the outer-shell parse on
+                // some Windows configurations even with `-File`. We use only
+                // single-quoted strings and string concat (`+`) for any
+                // interpolation needs.
                 format!(
                     concat!(
                         "$exitPath = {exit_path}; ",
-                        "$tmpPath = \"$exitPath.tmp.$PID\"; ",
+                        "$tmpPath = $exitPath + '.tmp.' + $PID; ",
                         "$global:LASTEXITCODE = $null; ",
-                        "& {binary} -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command {command}; ",
+                        "Invoke-Expression {command}; ",
                         "$success = $?; ",
                         "$nativeCode = $global:LASTEXITCODE; ",
                         "if ($null -ne $nativeCode) {{ $code = [int]$nativeCode }} ",
@@ -119,7 +149,6 @@ impl WindowsShell {
                         "exit $code"
                     ),
                     exit_path = exit_path,
-                    binary = binary,
                     command = command
                 )
             }
@@ -162,6 +191,10 @@ impl WindowsShell {
 /// bash uses [`shell_candidates`] + runtime retry to defend against this;
 /// callers that take this single-result API are accepting the cached
 /// outcome at face value.
+// No longer called by production bg-bash (the new path uses
+// `shell_candidates()` with retry directly). Kept for potential future
+// use and for parity with the foreground spawn loop.
+#[allow(dead_code)]
 pub(crate) fn resolve_windows_shell() -> WindowsShell {
     shell_candidates()
         .first()

@@ -373,6 +373,143 @@ function Run-OpencodeSession {
     }
 }
 
+# ---------------------------------------------------------------------------
+# Helper: run an aft NDJSON background-bash scenario with custom command and
+# expected exit code. Used by Scenarios 2c, 2d, 2e for v0.19.4 verification.
+#
+# Returns the parsed bash_status response (PSCustomObject) on success.
+# Throws on protocol failure, timeout, or unexpected status.
+# ---------------------------------------------------------------------------
+function Invoke-AftBgBashScenario {
+    param(
+        [string]$ProjectDir,
+        [string]$Command,
+        [int]$ExpectedExitCode = 0,
+        [int]$WaitSeconds = 2,
+        [hashtable]$ExtraEnv = @{}
+    )
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $env:AFT_BINARY_PATH
+    $psi.WorkingDirectory = $ProjectDir
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    foreach ($key in $ExtraEnv.Keys) {
+        $psi.EnvironmentVariables[$key] = [string]$ExtraEnv[$key]
+    }
+
+    $proc = [System.Diagnostics.Process]::new()
+    $proc.StartInfo = $psi
+    if (-not $proc.Start()) { throw "failed to start aft binary" }
+
+    try {
+        $configure = @{
+            id = "bg-configure"
+            command = "configure"
+            project_root = $ProjectDir
+            experimental_bash_background = $true
+        } | ConvertTo-Json -Compress
+        $proc.StandardInput.WriteLine($configure)
+        $proc.StandardInput.Flush()
+        $cfgResponse = $proc.StandardOutput.ReadLine() | ConvertFrom-Json
+        if (-not $cfgResponse.success) { throw "configure failed: $($cfgResponse | ConvertTo-Json -Compress)" }
+
+        $spawn = @{
+            id = "bg-spawn"
+            command = "bash"
+            params = @{
+                command = $Command
+                background = $true
+            }
+        } | ConvertTo-Json -Compress -Depth 5
+        $proc.StandardInput.WriteLine($spawn)
+        $proc.StandardInput.Flush()
+
+        # Skip past push frames (configure_warnings) until we see our reply.
+        $deadline = (Get-Date).AddSeconds(10)
+        do {
+            $line = $proc.StandardOutput.ReadLine()
+            if (-not $line) { throw "aft stdout closed before bg-spawn response" }
+            $spawnResponse = $line | ConvertFrom-Json
+        } while ($spawnResponse.id -ne "bg-spawn" -and (Get-Date) -lt $deadline)
+        if ($spawnResponse.id -ne "bg-spawn") { throw "timed out waiting for bg-spawn" }
+        if (-not $spawnResponse.success) { throw "background spawn failed: $($spawnResponse | ConvertTo-Json -Compress)" }
+
+        $taskId = [string]$spawnResponse.task_id
+        if ($taskId -notmatch '^bgb-[0-9a-f]{8}$') { throw "bad task id format: $taskId" }
+
+        Start-Sleep -Seconds $WaitSeconds
+
+        $status = @{
+            id = "bg-status"
+            command = "bash_status"
+            params = @{ task_id = $taskId }
+        } | ConvertTo-Json -Compress -Depth 5
+        $proc.StandardInput.WriteLine($status)
+        $proc.StandardInput.Flush()
+
+        $deadline = (Get-Date).AddSeconds(10)
+        do {
+            $line = $proc.StandardOutput.ReadLine()
+            if (-not $line) { throw "aft stdout closed before status response" }
+            $statusResponse = $line | ConvertFrom-Json
+        } while ($statusResponse.id -ne "bg-status" -and (Get-Date) -lt $deadline)
+
+        if ($statusResponse.id -ne "bg-status") { throw "timed out waiting for bg-status response" }
+        if (-not $statusResponse.success) { throw "bash_status failed: $($statusResponse | ConvertTo-Json -Compress)" }
+
+        # Status check: completed for exit==0, failed for non-zero.
+        $expectedStatus = if ($ExpectedExitCode -eq 0) { "completed" } else { "failed" }
+        if ($statusResponse.status -ne $expectedStatus) {
+            # Dump stderr/stdout file content for debugging when assertions fail.
+            $stderrTail = ""
+            if ($statusResponse.stderr_path -and (Test-Path $statusResponse.stderr_path)) {
+                $stderrTail = " | stderr: " + (Get-Content -Raw $statusResponse.stderr_path)
+            }
+            $stdoutTail = ""
+            if ($statusResponse.output_path -and (Test-Path $statusResponse.output_path)) {
+                $stdoutTail = " | stdout: " + (Get-Content -Raw $statusResponse.output_path)
+            }
+            # Also dump the wrapper file (.ps1 or .bat) that was actually
+            # written for the task — this is the smoking gun for wrapper-
+            # generation bugs.
+            $wrapperDump = ""
+            if ($statusResponse.output_path) {
+                $taskDir = Split-Path -Parent $statusResponse.output_path
+                $taskBase = (Split-Path -Leaf $statusResponse.output_path) -replace '\.stdout$',''
+                foreach ($ext in @('ps1','bat')) {
+                    $wrapperPath = Join-Path $taskDir "$taskBase.$ext"
+                    if (Test-Path $wrapperPath) {
+                        $wrapperDump = " | wrapper(${ext}): " + (Get-Content -Raw $wrapperPath)
+                        break
+                    }
+                }
+                if (-not $wrapperDump) {
+                    $wrapperDump = " | wrapper: NOT FOUND in $taskDir (looked for $taskBase.ps1 / $taskBase.bat)"
+                }
+            }
+            throw "expected status=$expectedStatus, got: $($statusResponse | ConvertTo-Json -Compress)$stderrTail$stdoutTail$wrapperDump"
+        }
+        if ($statusResponse.exit_code -ne $ExpectedExitCode) {
+            $stderrTail = ""
+            if ($statusResponse.stderr_path -and (Test-Path $statusResponse.stderr_path)) {
+                $stderrTail = " | stderr: " + (Get-Content -Raw $statusResponse.stderr_path)
+            }
+            throw "expected exit_code=$ExpectedExitCode, got $($statusResponse.exit_code) (full: $($statusResponse | ConvertTo-Json -Compress))$stderrTail"
+        }
+
+        return $statusResponse
+    } finally {
+        try { $proc.StandardInput.Close() } catch { }
+        if (-not $proc.WaitForExit(3000)) {
+            try { $proc.Kill() } catch { }
+            $proc.WaitForExit(3000) | Out-Null
+        }
+    }
+}
+
 function Invoke-AftNdjsonScenario {
     param([string]$ProjectDir)
 
@@ -410,7 +547,18 @@ function Invoke-AftNdjsonScenario {
         } | ConvertTo-Json -Compress -Depth 5
         $proc.StandardInput.WriteLine($spawn)
         $proc.StandardInput.Flush()
-        $spawnResponse = $proc.StandardOutput.ReadLine() | ConvertFrom-Json
+
+        # Skip past push frames (configure_warnings, progress, etc.) until
+        # we see our reply with id=bg-spawn. Without this, the very first
+        # ReadLine() may return a configure_warnings push frame from the
+        # earlier configure call, breaking the protocol assertion.
+        $deadline = (Get-Date).AddSeconds(10)
+        do {
+            $line = $proc.StandardOutput.ReadLine()
+            if (-not $line) { throw "aft stdout closed before bg-spawn response" }
+            $spawnResponse = $line | ConvertFrom-Json
+        } while ($spawnResponse.id -ne "bg-spawn" -and (Get-Date) -lt $deadline)
+        if ($spawnResponse.id -ne "bg-spawn") { throw "timed out waiting for bg-spawn response" }
         if (-not $spawnResponse.success) { throw "background spawn failed: $($spawnResponse | ConvertTo-Json -Compress)" }
 
         $taskId = [string]$spawnResponse.task_id
@@ -778,6 +926,130 @@ Write-Host ""
 
 Check "background bash direct aft binary completes" {
     Invoke-AftNdjsonScenario -ProjectDir $ProjectDir
+}
+
+# ---------------------------------------------------------------------------
+# Scenario 2d: Background bash exit-code correctness (v0.19.4 P2-2)
+#
+# Issue #27 Oracle review found that the cmd.exe background wrapper used
+# %ERRORLEVEL% (parse-time expansion) instead of !ERRORLEVEL! (runtime).
+# That bug recorded a stale 0 in the exit marker regardless of the user
+# command's real exit code. The fix uses /V:ON + !ERRORLEVEL! so cmd-
+# fallback bg tasks now correctly capture non-zero exit codes.
+#
+# This scenario exercises the bg-bash path with a command that DEFINITELY
+# returns non-zero. If the cmd wrapper still had the parse-time bug AND
+# cmd happened to be the chosen shell (issue #27 SKUs), we'd see exit
+# 0 in the marker even though the user command exited 42.
+#
+# On dev machines with PowerShell, the wrapper is PowerShell rather than
+# cmd, so this scenario validates the PowerShell wrapper exit-code path
+# too. Both paths must report exit 42 for "completed: false / failed".
+# ---------------------------------------------------------------------------
+
+Write-Host ""
+Write-Host "-- Scenario 2d: Background bash exit-code correctness (P2-2) --"
+Write-Host ""
+
+Check "bg bash records non-zero exit code (cmd /c exit 42)" {
+    Invoke-AftBgBashScenario `
+        -ProjectDir $ProjectDir `
+        -Command "cmd /c exit 42" `
+        -ExpectedExitCode 42 `
+        -WaitSeconds 2 | Out-Null
+    return $true
+}
+
+Check "bg bash records zero exit code (cmd /c exit 0)" {
+    Invoke-AftBgBashScenario `
+        -ProjectDir $ProjectDir `
+        -Command "cmd /c exit 0" `
+        -ExpectedExitCode 0 `
+        -WaitSeconds 2 | Out-Null
+    return $true
+}
+
+# ---------------------------------------------------------------------------
+# Scenario 2e: Background bash forced cmd.exe fallback (v0.19.4 P2-1)
+#
+# Issue #27: stripped Windows SKUs (IoT LTSC), restricted PATH, ASR rules,
+# and AppLocker policies can make pwsh.exe / powershell.exe unavailable
+# at runtime even when which::which() believed they were on PATH. Before
+# v0.19.4, bg-bash had no runtime fallback — it would fail outright.
+# After v0.19.4, the spawn loop walks pwsh -> powershell -> cmd and
+# retries on NotFound.
+#
+# We can't actually delete PowerShell from the test VM (it would break
+# other test infrastructure), but we CAN simulate the SKU-stripped case
+# by setting PATH to a directory that contains only cmd.exe. With this
+# PATH, which::which("pwsh.exe") returns false and which::which(
+# "powershell.exe") returns false, so the candidate list is just
+# [Cmd]. The bg-bash spawn must then succeed via cmd.exe.
+#
+# This proves end-to-end that the cmd-as-fallback path actually works
+# under realistic restricted-PATH conditions, not just in unit tests.
+# ---------------------------------------------------------------------------
+
+Write-Host ""
+Write-Host "-- Scenario 2e: Background bash forced cmd fallback (P2-1) --"
+Write-Host ""
+
+# Build a PATH that contains System32 (for cmd.exe + Windows DLLs)
+# but EXCLUDES the WindowsPowerShell\v1.0 directory where powershell.exe
+# lives, AND excludes any directory that contains pwsh.exe (PowerShell 7+
+# typically installs to Program Files\PowerShell\7\). The aft process
+# will probe via which::which() and find neither PowerShell binary,
+# leaving only cmd.exe as a candidate.
+#
+# We deliberately keep System32 itself in PATH so cmd.exe can still load
+# its DLLs and invoke standard utilities; we only filter out the
+# PowerShell-specific subdirs.
+$OriginalPath = $env:PATH
+$PathEntries = $OriginalPath -split ';' | Where-Object {
+    $_ -and
+    $_ -notmatch 'WindowsPowerShell' -and
+    $_ -notmatch 'PowerShell\\7' -and
+    $_ -notmatch 'PowerShell\\6' -and
+    -not (Test-Path (Join-Path $_ 'pwsh.exe')) -and
+    -not (Test-Path (Join-Path $_ 'powershell.exe'))
+}
+$NoShellPath = ($PathEntries -join ';')
+
+# Sanity: PATH must still contain cmd.exe somewhere. If this fails, the
+# scenario itself is broken (not the fix).
+$CmdResolved = $false
+foreach ($dir in $PathEntries) {
+    if (Test-Path (Join-Path $dir 'cmd.exe')) { $CmdResolved = $true; break }
+}
+if (-not $CmdResolved) {
+    Write-Skip "cmd.exe not reachable via filtered PATH; harness misconfigured (skipping forced-fallback scenario)"
+} else {
+    Check "bg bash succeeds when PATH excludes pwsh / powershell" {
+        # ExtraEnv overrides PATH for the spawned aft process only. Aft's
+        # which::which() probe will not find PowerShell, leaving Cmd as the
+        # sole candidate. The wrapper script uses cmd semantics and the new
+        # !ERRORLEVEL! capture.
+        Invoke-AftBgBashScenario `
+            -ProjectDir $ProjectDir `
+            -Command "cmd /c echo cmd-fallback-ok" `
+            -ExpectedExitCode 0 `
+            -WaitSeconds 2 `
+            -ExtraEnv @{ PATH = $NoShellPath } | Out-Null
+        return $true
+    }
+
+    Check "bg bash records non-zero via cmd.exe wrapper (forced PATH)" {
+        # Same restricted PATH, exercising !ERRORLEVEL! capture specifically.
+        # With the pre-fix %ERRORLEVEL% bug this would record exit 0
+        # instead of 42, causing the assertion to fail.
+        Invoke-AftBgBashScenario `
+            -ProjectDir $ProjectDir `
+            -Command "cmd /c exit 42" `
+            -ExpectedExitCode 42 `
+            -WaitSeconds 2 `
+            -ExtraEnv @{ PATH = $NoShellPath } | Out-Null
+        return $true
+    }
 }
 
 # ---------------------------------------------------------------------------

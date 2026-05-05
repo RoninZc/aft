@@ -27,8 +27,10 @@ use super::process::terminate_pgid;
 #[cfg(windows)]
 use super::process::terminate_pid;
 use super::{BgTaskInfo, BgTaskStatus};
-#[cfg(windows)]
-use crate::windows_shell::resolve_windows_shell;
+// Note: `resolve_windows_shell` is no longer imported at module scope —
+// production code in `spawn_detached_child` uses `shell_candidates()`
+// with retry instead, and the function remains in `windows_shell.rs`
+// for tests and as a future helper.
 
 /// Default timeout for background bash tasks: 30 minutes.
 /// Agents can override per-call via the `timeout` parameter (in ms).
@@ -948,20 +950,71 @@ fn detached_shell_command_for(
     shell: crate::windows_shell::WindowsShell,
     command: &str,
     exit_path: &Path,
-) -> Command {
-    let wrapper = shell.wrapper_script(command, exit_path);
-    // bg_command() applies shell-specific invocation flags that the
-    // wrapper relies on. For Cmd, this is `/V:ON` to enable delayed
-    // expansion (`!ERRORLEVEL!`); without it, the cmd wrapper would
-    // record a stale exit code. PowerShell variants don't need extra
-    // flags. See `WindowsShell::bg_command` for details.
-    let mut cmd = shell.bg_command(&wrapper);
+    paths: &TaskPaths,
+) -> Result<Command, String> {
+    use crate::windows_shell::WindowsShell;
+    // Write the wrapper to a temp file alongside the other task files,
+    // then invoke the shell with the file path as a single clean
+    // argument. This sidesteps the entire Windows command-line quoting
+    // mess (Rust std-lib quoting + cmd /C parser + PowerShell -Command
+    // parser all interacting with embedded quotes in the wrapper).
+    //
+    // Path arguments don't need quoting in the same problematic way
+    // because: (1) we use no-space task IDs (bgb-XXXXXXXX) so the path
+    // contains no characters that need shell escaping; (2) the wrapper
+    // body's internal quotes never reach the shell command line — the
+    // shell reads them from disk by file syntax rules, not command-line
+    // parser rules.
+    let wrapper_body = shell.wrapper_script(command, exit_path);
+    let wrapper_ext = match shell {
+        WindowsShell::Pwsh | WindowsShell::Powershell => "ps1",
+        WindowsShell::Cmd => "bat",
+    };
+    let wrapper_path = paths.dir.join(format!(
+        "{}.{}",
+        paths
+            .json
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("wrapper"),
+        wrapper_ext
+    ));
+    fs::write(&wrapper_path, wrapper_body)
+        .map_err(|e| format!("failed to write background bash wrapper script: {e}"))?;
+
+    let mut cmd = Command::new(shell.binary());
+    match shell {
+        WindowsShell::Pwsh | WindowsShell::Powershell => {
+            // -File runs the script with no quoting issues. `-NoLogo`,
+            // `-NoProfile`, etc. apply to the host before the file runs.
+            cmd.args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ]);
+            cmd.arg(&wrapper_path);
+        }
+        WindowsShell::Cmd => {
+            // `cmd /V:ON /D /C "<bat-file-path>"` — invoking a .bat
+            // file via /C is well-defined; the file's contents are
+            // read line-by-line by cmd's batch processor, NOT
+            // re-interpreted by the /C parser. This avoids the
+            // "filename syntax incorrect" errors that came from
+            // having complex compound commands on the cmd line.
+            cmd.args(["/V:ON", "/D", "/C"]);
+            cmd.arg(&wrapper_path);
+        }
+    }
+
     // Win32 process creation flags:
     // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB
     // https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags
     const DETACHED_BG_FLAGS: u32 = 0x0000_0200 | 0x0000_0008 | 0x0100_0000;
     cmd.creation_flags(DETACHED_BG_FLAGS);
-    cmd
+    Ok(cmd)
 }
 
 /// Spawn a detached background bash child process.
@@ -1002,8 +1055,33 @@ fn spawn_detached_child(
     }
     #[cfg(windows)]
     {
-        use crate::windows_shell::shell_candidates;
-        let candidates = shell_candidates();
+        use crate::windows_shell::{shell_candidates, WindowsShell};
+        // For background bash, prefer cmd.exe over PowerShell because the
+        // PowerShell wrapper writes captured output through the detached-
+        // process stdout/stderr handles inconsistently on some Windows
+        // configurations (observed live: empty stdout/stderr even when the
+        // wrapper script clearly executes). cmd.exe's batch wrapper is a
+        // simpler execution model with reliable detached-handle inheritance,
+        // and `!ERRORLEVEL!` correctly captures the user command's real
+        // exit code (Oracle review P1-1 fix).
+        //
+        // Foreground bash still walks the regular pwsh→powershell→cmd
+        // priority order because foreground stdout/stderr are inherited
+        // pipes that PowerShell handles correctly.
+        //
+        // If cmd.exe is unavailable for any reason (extremely unusual on
+        // Windows but possible under aggressive lockdown), we fall through
+        // to the PowerShell variants in priority order — better to attempt
+        // a partially-working PS wrapper than fail outright.
+        let raw_candidates = shell_candidates();
+        let mut candidates: Vec<WindowsShell> = Vec::with_capacity(raw_candidates.len());
+        for shell in &raw_candidates {
+            if *shell == WindowsShell::Cmd {
+                candidates.insert(0, *shell);
+            } else {
+                candidates.push(*shell);
+            }
+        }
         let mut last_error: Option<String> = None;
         for (idx, shell) in candidates.iter().enumerate() {
             // Re-open capture handles per attempt; spawn() consumes them.
@@ -1011,7 +1089,7 @@ fn spawn_detached_child(
                 .map_err(|e| format!("failed to open stdout capture file: {e}"))?;
             let stderr = create_capture_file(&paths.stderr)
                 .map_err(|e| format!("failed to open stderr capture file: {e}"))?;
-            let mut cmd = detached_shell_command_for(*shell, command, &paths.exit);
+            let mut cmd = detached_shell_command_for(*shell, command, &paths.exit, paths)?;
             cmd.current_dir(workdir)
                 .envs(env)
                 .stdin(Stdio::null())
@@ -1427,9 +1505,9 @@ mod tests {
     }
 
     /// Issue #27 Oracle review P1: `bg_command()` for Cmd MUST prepend
-    /// `/V:ON` to enable delayed expansion. Without this flag, the
-    /// wrapper's `!ERRORLEVEL!` would not be expanded and cmd would
-    /// literally write the string `!ERRORLEVEL!` into the marker file.
+    /// `/V:ON` to enable delayed expansion AND `/S` to use simple-quote
+    /// parsing (so cmd's /C parser doesn't mangle the wrapper's internal
+    /// quotes from `cmd_quote`).
     #[cfg(windows)]
     #[test]
     fn windows_shell_cmd_bg_command_enables_delayed_expansion() {
@@ -1439,13 +1517,14 @@ mod tests {
         let args_strs: Vec<&str> = args.iter().filter_map(|a| a.to_str()).collect();
         assert_eq!(
             args_strs,
-            vec!["/V:ON", "/D", "/C", "echo wrapped"],
-            "Cmd::bg_command must prepend /V:ON for delayed expansion"
+            vec!["/V:ON", "/D", "/S", "/C", "echo wrapped"],
+            "Cmd::bg_command must prepend /V:ON /D /S /C"
         );
     }
 
-    /// PowerShell variants don't need `/V:ON`-style flags; their args are
-    /// the same for foreground (`command()`) and background (`bg_command()`).
+    /// PowerShell variants don't need `/V:ON`-style flags; their args
+    /// are the same for foreground (`command()`) and background
+    /// (`bg_command()`).
     #[cfg(windows)]
     #[test]
     fn windows_shell_pwsh_bg_command_uses_standard_args() {
