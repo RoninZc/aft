@@ -40,6 +40,7 @@ impl IndentStyle {
             LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp | LangId::Bash => {
                 IndentStyle::Spaces(4)
             }
+            LangId::Solidity => IndentStyle::Spaces(4),
             LangId::Html => IndentStyle::Spaces(2),
             LangId::Markdown => IndentStyle::Spaces(4),
         }

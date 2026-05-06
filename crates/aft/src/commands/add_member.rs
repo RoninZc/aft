@@ -463,6 +463,7 @@ fn find_scope_container(
         | LangId::Zig
         | LangId::CSharp
         | LangId::Bash
+        | LangId::Solidity
         | LangId::Html
         | LangId::Markdown => {}
     }

@@ -315,6 +315,47 @@ const BASH_QUERY: &str = r#"
   name: (word) @fn.name) @fn.def
 "#;
 
+// --- Solidity query ---
+
+const SOL_QUERY: &str = r#"
+;; contracts / libraries / interfaces
+(contract_declaration
+  name: (identifier) @contract.name) @contract.def
+
+(library_declaration
+  name: (identifier) @library.name) @library.def
+
+(interface_declaration
+  name: (identifier) @interface.name) @interface.def
+
+;; functions, modifiers, constructors
+(function_definition
+  name: (identifier) @fn.name) @fn.def
+
+(modifier_definition
+  name: (identifier) @modifier.name) @modifier.def
+
+(constructor_definition) @constructor.def
+
+;; events / errors
+(event_definition
+  name: (identifier) @event.name) @event.def
+
+(error_declaration
+  name: (identifier) @error.name) @error.def
+
+;; data types
+(struct_declaration
+  name: (identifier) @struct.name) @struct.def
+
+(enum_declaration
+  name: (identifier) @enum.name) @enum.def
+
+;; state variables (top-level inside a contract)
+(state_variable_declaration
+  name: (identifier) @var.name) @var.def
+"#;
+
 /// Supported language identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LangId {
@@ -331,6 +372,7 @@ pub enum LangId {
     Bash,
     Html,
     Markdown,
+    Solidity,
 }
 
 /// Maps file extension to language identifier.
@@ -350,6 +392,7 @@ pub fn detect_language(path: &Path) -> Option<LangId> {
         "sh" | "bash" | "zsh" => Some(LangId::Bash),
         "html" | "htm" => Some(LangId::Html),
         "md" | "markdown" | "mdx" => Some(LangId::Markdown),
+        "sol" => Some(LangId::Solidity),
         _ => None,
     }
 }
@@ -370,6 +413,7 @@ pub fn grammar_for(lang: LangId) -> Language {
         LangId::Bash => tree_sitter_bash::LANGUAGE.into(),
         LangId::Html => tree_sitter_html::LANGUAGE.into(),
         LangId::Markdown => tree_sitter_md::LANGUAGE.into(),
+        LangId::Solidity => tree_sitter_solidity::LANGUAGE.into(),
     }
 }
 
@@ -388,6 +432,7 @@ fn query_for(lang: LangId) -> Option<&'static str> {
         LangId::Bash => Some(BASH_QUERY),
         LangId::Html => None, // HTML uses direct tree walking like Markdown
         LangId::Markdown => None,
+        LangId::Solidity => Some(SOL_QUERY),
     }
 }
 
@@ -412,6 +457,8 @@ static CSHARP_QUERY_CACHE: LazyLock<Result<Query, String>> =
     LazyLock::new(|| compile_query(LangId::CSharp));
 static BASH_QUERY_CACHE: LazyLock<Result<Query, String>> =
     LazyLock::new(|| compile_query(LangId::Bash));
+static SOL_QUERY_CACHE: LazyLock<Result<Query, String>> =
+    LazyLock::new(|| compile_query(LangId::Solidity));
 
 fn compile_query(lang: LangId) -> Result<Query, String> {
     let query_src = query_for(lang).ok_or_else(|| format!("missing query for {lang:?}"))?;
@@ -433,6 +480,7 @@ fn cached_query_for(lang: LangId) -> Result<Option<&'static Query>, AftError> {
         LangId::Zig => Some(&*ZIG_QUERY_CACHE),
         LangId::CSharp => Some(&*CSHARP_QUERY_CACHE),
         LangId::Bash => Some(&*BASH_QUERY_CACHE),
+        LangId::Solidity => Some(&*SOL_QUERY_CACHE),
         LangId::Html | LangId::Markdown => None,
     };
 
@@ -842,6 +890,7 @@ pub fn extract_symbols_from_tree(
         LangId::Zig => extract_zig_symbols(source, &root, query),
         LangId::CSharp => extract_csharp_symbols(source, &root, query),
         LangId::Bash => extract_bash_symbols(source, &root, query),
+        LangId::Solidity => extract_solidity_symbols(source, &root, query),
         LangId::Html | LangId::Markdown => unreachable!("handled before query lookup"),
     }
 }
@@ -890,6 +939,13 @@ pub(crate) fn node_range_with_decorators(node: &Node, source: &str, lang: LangId
             LangId::Go | LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp | LangId::Bash => {
                 // Include doc comments only if immediately above (no blank line gap)
                 kind == "comment" && is_adjacent_line(&prev, &current, source)
+            }
+            LangId::Solidity => {
+                // Include `///` doc comments and `/** */` NatSpec blocks if immediately above
+                let text = node_text(source, &prev);
+                kind == "comment"
+                    && (text.starts_with("///") || text.starts_with("/**"))
+                    && is_adjacent_line(&prev, &current, source)
             }
             LangId::Python => {
                 // Decorators are handled by decorated_definition capture
@@ -2723,6 +2779,257 @@ fn extract_bash_symbols(source: &str, root: &Node, query: &Query) -> Result<Vec<
         }
     }
 
+    Ok(symbols)
+}
+
+/// Walk up from `node` and collect the names of any enclosing
+/// contract / library / interface, outermost first.
+fn solidity_scope_chain(node: &Node, source: &str) -> Vec<String> {
+    let mut chain = Vec::new();
+    let mut current = node.parent();
+
+    while let Some(parent) = current {
+        match parent.kind() {
+            "contract_declaration" | "library_declaration" | "interface_declaration" => {
+                if let Some(name_node) = parent.child_by_field_name("name") {
+                    chain.push(node_text(source, &name_node).to_string());
+                }
+            }
+            _ => {}
+        }
+        current = parent.parent();
+    }
+
+    chain.reverse();
+    chain
+}
+
+fn extract_solidity_symbols(
+    source: &str,
+    root: &Node,
+    query: &Query,
+) -> Result<Vec<Symbol>, AftError> {
+    let lang = LangId::Solidity;
+    let capture_names = query.capture_names();
+
+    let mut symbols = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, *root, source.as_bytes());
+
+    while let Some(m) = {
+        matches.advance();
+        matches.get()
+    } {
+        let mut contract_name_node = None;
+        let mut contract_def_node = None;
+        let mut library_name_node = None;
+        let mut library_def_node = None;
+        let mut interface_name_node = None;
+        let mut interface_def_node = None;
+        let mut fn_name_node = None;
+        let mut fn_def_node = None;
+        let mut modifier_name_node = None;
+        let mut modifier_def_node = None;
+        let mut constructor_def_node = None;
+        let mut event_name_node = None;
+        let mut event_def_node = None;
+        let mut error_name_node = None;
+        let mut error_def_node = None;
+        let mut struct_name_node = None;
+        let mut struct_def_node = None;
+        let mut enum_name_node = None;
+        let mut enum_def_node = None;
+        let mut var_name_node = None;
+        let mut var_def_node = None;
+
+        for cap in m.captures {
+            let Some(&name) = capture_names.get(cap.index as usize) else {
+                continue;
+            };
+            match name {
+                "contract.name" => contract_name_node = Some(cap.node),
+                "contract.def" => contract_def_node = Some(cap.node),
+                "library.name" => library_name_node = Some(cap.node),
+                "library.def" => library_def_node = Some(cap.node),
+                "interface.name" => interface_name_node = Some(cap.node),
+                "interface.def" => interface_def_node = Some(cap.node),
+                "fn.name" => fn_name_node = Some(cap.node),
+                "fn.def" => fn_def_node = Some(cap.node),
+                "modifier.name" => modifier_name_node = Some(cap.node),
+                "modifier.def" => modifier_def_node = Some(cap.node),
+                "constructor.def" => constructor_def_node = Some(cap.node),
+                "event.name" => event_name_node = Some(cap.node),
+                "event.def" => event_def_node = Some(cap.node),
+                "error.name" => error_name_node = Some(cap.node),
+                "error.def" => error_def_node = Some(cap.node),
+                "struct.name" => struct_name_node = Some(cap.node),
+                "struct.def" => struct_def_node = Some(cap.node),
+                "enum.name" => enum_name_node = Some(cap.node),
+                "enum.def" => enum_def_node = Some(cap.node),
+                "var.name" => var_name_node = Some(cap.node),
+                "var.def" => var_def_node = Some(cap.node),
+                _ => {}
+            }
+        }
+
+        // Contract
+        if let (Some(name_node), Some(def_node)) = (contract_name_node, contract_def_node) {
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Class,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: vec![],
+                exported: true,
+                parent: None,
+            });
+        }
+
+        // Library (treated like a contract — class-shaped container)
+        if let (Some(name_node), Some(def_node)) = (library_name_node, library_def_node) {
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Class,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: vec![],
+                exported: true,
+                parent: None,
+            });
+        }
+
+        // Interface
+        if let (Some(name_node), Some(def_node)) = (interface_name_node, interface_def_node) {
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Interface,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                scope_chain: vec![],
+                exported: true,
+                parent: None,
+            });
+        }
+
+        // Function — Method when inside a contract/library/interface, Function otherwise
+        if let (Some(name_node), Some(def_node)) = (fn_name_node, fn_def_node) {
+            let scope_chain = solidity_scope_chain(&def_node, source);
+            let kind = if scope_chain.is_empty() {
+                SymbolKind::Function
+            } else {
+                SymbolKind::Method
+            };
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                parent: scope_chain.last().cloned(),
+                scope_chain,
+                exported: true,
+            });
+        }
+
+        // Modifier — always inside a contract/library/interface, treat as Method
+        if let (Some(name_node), Some(def_node)) = (modifier_name_node, modifier_def_node) {
+            let scope_chain = solidity_scope_chain(&def_node, source);
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Method,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                parent: scope_chain.last().cloned(),
+                scope_chain,
+                exported: true,
+            });
+        }
+
+        // Constructor — synthetic name "constructor", parent is the enclosing contract
+        if let Some(def_node) = constructor_def_node {
+            let scope_chain = solidity_scope_chain(&def_node, source);
+            symbols.push(Symbol {
+                name: "constructor".to_string(),
+                kind: SymbolKind::Method,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                parent: scope_chain.last().cloned(),
+                scope_chain,
+                exported: true,
+            });
+        }
+
+        // Event
+        if let (Some(name_node), Some(def_node)) = (event_name_node, event_def_node) {
+            let scope_chain = solidity_scope_chain(&def_node, source);
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Function,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                parent: scope_chain.last().cloned(),
+                scope_chain,
+                exported: true,
+            });
+        }
+
+        // Error (custom error declaration)
+        if let (Some(name_node), Some(def_node)) = (error_name_node, error_def_node) {
+            let scope_chain = solidity_scope_chain(&def_node, source);
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::TypeAlias,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                parent: scope_chain.last().cloned(),
+                scope_chain,
+                exported: true,
+            });
+        }
+
+        // Struct
+        if let (Some(name_node), Some(def_node)) = (struct_name_node, struct_def_node) {
+            let scope_chain = solidity_scope_chain(&def_node, source);
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Struct,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                parent: scope_chain.last().cloned(),
+                scope_chain,
+                exported: true,
+            });
+        }
+
+        // Enum
+        if let (Some(name_node), Some(def_node)) = (enum_name_node, enum_def_node) {
+            let scope_chain = solidity_scope_chain(&def_node, source);
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Enum,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                parent: scope_chain.last().cloned(),
+                scope_chain,
+                exported: true,
+            });
+        }
+
+        // State variable
+        if let (Some(name_node), Some(def_node)) = (var_name_node, var_def_node) {
+            let scope_chain = solidity_scope_chain(&def_node, source);
+            symbols.push(Symbol {
+                name: node_text(source, &name_node).to_string(),
+                kind: SymbolKind::Variable,
+                range: node_range_with_decorators(&def_node, source, lang),
+                signature: Some(extract_signature(source, &def_node)),
+                parent: scope_chain.last().cloned(),
+                scope_chain,
+                exported: true,
+            });
+        }
+    }
+
+    dedup_symbols(&mut symbols);
     Ok(symbols)
 }
 

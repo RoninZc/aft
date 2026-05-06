@@ -25,6 +25,7 @@ pub enum AstGrepLang {
     Cpp,
     Zig,
     CSharp,
+    Solidity,
 }
 
 impl AstGrepLang {
@@ -41,6 +42,7 @@ impl AstGrepLang {
             LangId::Cpp => Some(Self::Cpp),
             LangId::Zig => Some(Self::Zig),
             LangId::CSharp => Some(Self::CSharp),
+            LangId::Solidity => Some(Self::Solidity),
             LangId::Bash => None, // ast-grep doesn't support Bash
             // Markdown, CSS, HTML etc. don't have meaningful AST patterns
             _ => None,
@@ -60,6 +62,7 @@ impl AstGrepLang {
             "cpp" | "c++" | "cplusplus" => Some(Self::Cpp),
             "zig" => Some(Self::Zig),
             "csharp" | "c#" | "cs" => Some(Self::CSharp),
+            "solidity" | "sol" => Some(Self::Solidity),
             _ => None,
         }
     }
@@ -77,6 +80,7 @@ impl AstGrepLang {
             Self::Cpp => &["cc", "cpp", "cxx", "hpp", "hh"],
             Self::Zig => &["zig"],
             Self::CSharp => &["cs"],
+            Self::Solidity => &["sol"],
         }
     }
 
@@ -143,8 +147,14 @@ impl Language for AstGrepLang {
 
     fn expando_char(&self) -> char {
         match self {
-            // $ is not a valid identifier char in Python, Rust, C-family, Zig, or C#
-            Self::Python | Self::Rust | Self::C | Self::Cpp | Self::Zig | Self::CSharp => {
+            // $ is not a valid identifier char in Python, Rust, C-family, Zig, C#, or Solidity
+            Self::Python
+            | Self::Rust
+            | Self::C
+            | Self::Cpp
+            | Self::Zig
+            | Self::CSharp
+            | Self::Solidity => {
                 '\u{00B5}' // µ
             }
             // $ is valid in TS, JS, Go identifiers
@@ -166,6 +176,7 @@ impl LanguageExt for AstGrepLang {
             Self::Cpp => tree_sitter_cpp::LANGUAGE.into(),
             Self::Zig => tree_sitter_zig::LANGUAGE.into(),
             Self::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+            Self::Solidity => tree_sitter_solidity::LANGUAGE.into(),
         }
     }
 }
@@ -193,6 +204,11 @@ mod tests {
         assert_eq!(AstGrepLang::from_str("cpp"), Some(AstGrepLang::Cpp));
         assert_eq!(AstGrepLang::from_str("zig"), Some(AstGrepLang::Zig));
         assert_eq!(AstGrepLang::from_str("c#"), Some(AstGrepLang::CSharp));
+        assert_eq!(
+            AstGrepLang::from_str("solidity"),
+            Some(AstGrepLang::Solidity)
+        );
+        assert_eq!(AstGrepLang::from_str("sol"), Some(AstGrepLang::Solidity));
         assert_eq!(AstGrepLang::from_str("markdown"), None);
     }
 
@@ -248,6 +264,36 @@ mod tests {
         assert_eq!(AstGrepLang::TypeScript.expando_char(), '$');
         assert_eq!(AstGrepLang::JavaScript.expando_char(), '$');
         assert_eq!(AstGrepLang::Go.expando_char(), '$');
+    }
+
+    #[test]
+    fn test_solidity_function_pattern_probe() {
+        let lang = AstGrepLang::Solidity;
+        let source = "contract C {\n    function add(uint256 a) public pure returns (uint256) { return a; }\n}\n";
+        let grep = lang.ast_grep(source);
+        let root = grep.root();
+        // Probe several pattern shapes; print which ones tree-sitter-solidity
+        // accepts. At least one MUST match — that proves grammar wiring works
+        // end to end. ast-grep pattern shape varies by language so we don't
+        // pin to one specific pattern.
+        let patterns = [
+            "return $X;",
+            "uint256 $X",
+            "function $NAME",
+            "function add",
+            "contract C { $$$ }",
+        ];
+        let mut any_matched = false;
+        for pat in &patterns {
+            if root.find(*pat).is_some() {
+                any_matched = true;
+                break;
+            }
+        }
+        assert!(
+            any_matched,
+            "no Solidity pattern matched — grammar wiring broken"
+        );
     }
 
     #[test]

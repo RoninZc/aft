@@ -587,3 +587,166 @@ main "$@"
     let status = aft.shutdown();
     assert!(status.success());
 }
+
+#[test]
+fn outline_solidity_symbols_include_contracts_functions_events_and_errors() {
+    let dir = TempDir::new().unwrap();
+    let file = write_file(
+        dir.path(),
+        "contracts/Vault.sol",
+        r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+interface IERC20 {
+    function transfer(address to, uint256 amount) external returns (bool);
+}
+
+library SafeMath {
+    function add(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a + b;
+    }
+}
+
+contract Vault {
+    address public owner;
+    uint256 private _totalDeposits;
+
+    event Deposit(address indexed from, uint256 amount);
+    error Unauthorized(address caller);
+
+    struct UserInfo {
+        uint256 balance;
+        uint256 lastUpdate;
+    }
+
+    enum Status { Active, Paused, Closed }
+
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert Unauthorized(msg.sender);
+        _;
+    }
+
+    constructor(address initialOwner) {
+        owner = initialOwner;
+    }
+
+    function deposit() external payable {
+        _totalDeposits += msg.value;
+        emit Deposit(msg.sender, msg.value);
+    }
+
+    function withdraw(uint256 amount) external onlyOwner {
+        payable(owner).transfer(amount);
+    }
+}
+"#,
+    );
+
+    let mut aft = AftProcess::spawn();
+    assert_eq!(aft.configure(dir.path())["success"], true);
+    let text = outline_text(&mut aft, &file);
+
+    // Top-level containers
+    assert!(
+        text.contains("IERC20"),
+        "missing IERC20 interface in solidity outline: {text}"
+    );
+    assert!(
+        text.contains("SafeMath"),
+        "missing SafeMath library in solidity outline: {text}"
+    );
+    assert!(
+        text.contains("Vault"),
+        "missing Vault contract in solidity outline: {text}"
+    );
+
+    // Members of the Vault contract
+    assert!(
+        text.contains("constructor"),
+        "missing constructor in solidity outline: {text}"
+    );
+    assert!(
+        text.contains("deposit"),
+        "missing deposit function in solidity outline: {text}"
+    );
+    assert!(
+        text.contains("withdraw"),
+        "missing withdraw function in solidity outline: {text}"
+    );
+    assert!(
+        text.contains("onlyOwner"),
+        "missing onlyOwner modifier in solidity outline: {text}"
+    );
+
+    // Events and errors
+    assert!(
+        text.contains("Deposit"),
+        "missing Deposit event in solidity outline: {text}"
+    );
+    assert!(
+        text.contains("Unauthorized"),
+        "missing Unauthorized error in solidity outline: {text}"
+    );
+
+    // Data types
+    assert!(
+        text.contains("UserInfo"),
+        "missing UserInfo struct in solidity outline: {text}"
+    );
+    assert!(
+        text.contains("Status"),
+        "missing Status enum in solidity outline: {text}"
+    );
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
+#[test]
+fn outline_solidity_zoom_returns_function_body() {
+    let dir = TempDir::new().unwrap();
+    let file = write_file(
+        dir.path(),
+        "contracts/Counter.sol",
+        r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract Counter {
+    uint256 public count;
+
+    function increment() public {
+        count += 1;
+    }
+
+    function decrement() public {
+        require(count > 0, "underflow");
+        count -= 1;
+    }
+}
+"#,
+    );
+
+    let mut aft = AftProcess::spawn();
+    assert_eq!(aft.configure(dir.path())["success"], true);
+
+    let resp = send(
+        &mut aft,
+        json!({
+            "id": "zoom-solidity",
+            "command": "zoom",
+            "file": file,
+            "symbol": "increment",
+        }),
+    );
+
+    assert_eq!(resp["success"], true, "zoom should succeed: {resp:?}");
+    assert_eq!(resp["name"], "increment");
+    let content = resp["content"].as_str().unwrap_or("");
+    assert!(
+        content.contains("count += 1"),
+        "zoom content should contain function body: {content}"
+    );
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}

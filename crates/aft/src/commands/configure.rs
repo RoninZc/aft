@@ -438,6 +438,7 @@ fn lang_key(lang: LangId) -> &'static str {
         LangId::Zig => "zig",
         LangId::CSharp => "csharp",
         LangId::Bash => "bash",
+        LangId::Solidity => "solidity",
         LangId::Html => "html",
         LangId::Markdown => "markdown",
     }
@@ -566,7 +567,12 @@ fn formatter_candidates(
                 Vec::new()
             }
         }
-        LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp | LangId::Bash => Vec::new(),
+        LangId::C
+        | LangId::Cpp
+        | LangId::Zig
+        | LangId::CSharp
+        | LangId::Bash
+        | LangId::Solidity => Vec::new(),
         LangId::Html | LangId::Markdown => Vec::new(),
     }
 }
@@ -617,7 +623,12 @@ fn checker_candidates(lang: LangId, config: &crate::config::Config) -> Vec<Confi
                 Vec::new()
             }
         }
-        LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp | LangId::Bash => Vec::new(),
+        LangId::C
+        | LangId::Cpp
+        | LangId::Zig
+        | LangId::CSharp
+        | LangId::Bash
+        | LangId::Solidity => Vec::new(),
         LangId::Html | LangId::Markdown => Vec::new(),
     }
 }

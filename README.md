@@ -158,6 +158,13 @@ automatically on first use — no install ceremony required.
 **Currently supported harnesses:** [OpenCode](https://opencode.ai) and [Pi](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent).
 MCP support for Claude Code / Cursor is on the roadmap.
 
+**Supported languages (16):** TypeScript / TSX, JavaScript / JSX, Python, Rust, Go, C, C++,
+C#, Zig, Bash / Shell, HTML, Markdown, and Solidity. All 16 work with `aft_outline`,
+`aft_zoom`, `read`/`edit`/`write`, and the rest of the structural tool surface. AST pattern
+search and replace (`ast_grep_search` / `ast_grep_replace`) covers TS/JS, Python, Rust, Go,
+C, C++, C#, Zig, and Solidity. Import management (`aft_import`) covers TS/JS/TSX, Python,
+Rust, and Go.
+
 ---
 
 ## How it Helps Agents
@@ -1513,8 +1520,7 @@ adapter package per harness:
                   │     aft binary         │  ← shared core
                   │       (Rust)           │
                   ├────────────────────────┤
-                  │ • tree-sitter (15 lang)│
-                  │ • symbols & call graph │
+                   │ • tree-sitter (16 lang)│                  │ • symbols & call graph │
                   │ • diff/format/backup   │
                   │ • LSP client           │
                   │ • trigram index (exp)  │

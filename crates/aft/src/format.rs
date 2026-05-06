@@ -352,6 +352,7 @@ fn lang_key(lang: LangId) -> &'static str {
         LangId::Zig => "zig",
         LangId::CSharp => "csharp",
         LangId::Bash => "bash",
+        LangId::Solidity => "solidity",
         LangId::Html => "html",
         LangId::Markdown => "markdown",
     }
@@ -486,7 +487,12 @@ fn formatter_candidates(lang: LangId, config: &Config, file_str: &str) -> Vec<To
                 Vec::new()
             }
         }
-        LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp | LangId::Bash => Vec::new(),
+        LangId::C
+        | LangId::Cpp
+        | LangId::Zig
+        | LangId::CSharp
+        | LangId::Bash
+        | LangId::Solidity => Vec::new(),
         LangId::Html => Vec::new(),
         LangId::Markdown => Vec::new(),
     }
@@ -581,7 +587,12 @@ fn checker_candidates(lang: LangId, config: &Config, file_str: &str) -> Vec<Tool
                 Vec::new()
             }
         }
-        LangId::C | LangId::Cpp | LangId::Zig | LangId::CSharp | LangId::Bash => Vec::new(),
+        LangId::C
+        | LangId::Cpp
+        | LangId::Zig
+        | LangId::CSharp
+        | LangId::Bash
+        | LangId::Solidity => Vec::new(),
         LangId::Html => Vec::new(),
         LangId::Markdown => Vec::new(),
     }
@@ -790,6 +801,7 @@ fn placeholder_file_for_language(project_root: &Path, lang: LangId) -> PathBuf {
         LangId::Zig => "aft_tool_detection.zig",
         LangId::CSharp => "aft_tool_detection.cs",
         LangId::Bash => "aft_tool_detection.sh",
+        LangId::Solidity => "aft_tool_detection.sol",
         LangId::Html => "aft-tool-detection.html",
         LangId::Markdown => "aft-tool-detection.md",
     };
