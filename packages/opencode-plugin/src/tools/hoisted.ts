@@ -18,6 +18,7 @@ import { applyUpdateChunks, parsePatch } from "../patch-parser.js";
 import type { PluginContext } from "../types.js";
 import { callBridge } from "./_shared.js";
 import { createBashKillTool, createBashStatusTool, createBashTool } from "./bash.js";
+import { runAsk } from "./permissions.js";
 
 /** Extract callID from plugin context (exists on object but not in TS type). */
 function getCallID(ctx: unknown): string | undefined {
@@ -387,12 +388,14 @@ export function createReadTool(ctx: PluginContext): ToolDefinition {
       const filePath = path.isAbsolute(file) ? file : path.resolve(context.directory, file);
 
       // Permission check
-      await context.ask({
-        permission: "read",
-        patterns: [filePath],
-        always: ["*"],
-        metadata: {},
-      });
+      await runAsk(
+        context.ask({
+          permission: "read",
+          patterns: [filePath],
+          always: ["*"],
+          metadata: {},
+        }),
+      );
 
       // Image/PDF detection — return metadata for UI preview
       const ext = path.extname(filePath).toLowerCase();
@@ -549,12 +552,14 @@ function createWriteTool(ctx: PluginContext, editToolName = "edit"): ToolDefinit
       const relPath = path.relative(context.worktree, filePath);
 
       // Permission check
-      await context.ask({
-        permission: "edit",
-        patterns: [relPath],
-        always: ["*"],
-        metadata: { filepath: filePath },
-      });
+      await runAsk(
+        context.ask({
+          permission: "edit",
+          patterns: [relPath],
+          always: ["*"],
+          metadata: { filepath: filePath },
+        }),
+      );
 
       const data = await callBridge(ctx, context, "write", {
         file: filePath,
@@ -755,14 +760,16 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
         const ops = args.operations as Array<Record<string, unknown>>;
         const files = ops.map((op) => op.file as string).filter(Boolean);
 
-        await context.ask({
-          permission: "edit",
-          patterns: files.map((f) =>
-            path.relative(context.worktree, path.resolve(context.directory, f)),
-          ),
-          always: ["*"],
-          metadata: {},
-        });
+        await runAsk(
+          context.ask({
+            permission: "edit",
+            patterns: files.map((f) =>
+              path.relative(context.worktree, path.resolve(context.directory, f)),
+            ),
+            always: ["*"],
+            metadata: {},
+          }),
+        );
 
         const resolvedOps = ops.map((op) => ({
           ...op,
@@ -784,12 +791,14 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
 
       const relPath = path.relative(context.worktree, filePath);
 
-      await context.ask({
-        permission: "edit",
-        patterns: [relPath],
-        always: ["*"],
-        metadata: { filepath: filePath },
-      });
+      await runAsk(
+        context.ask({
+          permission: "edit",
+          patterns: [relPath],
+          always: ["*"],
+          metadata: { filepath: filePath },
+        }),
+      );
 
       const params: Record<string, unknown> = { file: filePath };
 
@@ -1030,12 +1039,14 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
       const relPaths = Array.from(affectedAbs).map((abs) => path.relative(context.worktree, abs));
       const multiFileWritePaths = Array.from(affectedAbs);
 
-      await context.ask({
-        permission: "edit",
-        patterns: relPaths,
-        always: ["*"],
-        metadata: {},
-      });
+      await runAsk(
+        context.ask({
+          permission: "edit",
+          patterns: relPaths,
+          always: ["*"],
+          metadata: {},
+        }),
+      );
 
       // Pre-patch checkpoint covers files that exist pre-patch (so the
       // agent can `aft_safety` undo if they want to abort after seeing a
@@ -1450,12 +1461,14 @@ function createDeleteTool(ctx: PluginContext): ToolDefinition {
         path.isAbsolute(f) ? f : path.resolve(context.directory, f),
       );
 
-      await context.ask({
-        permission: "edit",
-        patterns: absolutePaths,
-        always: ["*"],
-        metadata: { action: "delete", count: absolutePaths.length },
-      });
+      await runAsk(
+        context.ask({
+          permission: "edit",
+          patterns: absolutePaths,
+          always: ["*"],
+          metadata: { action: "delete", count: absolutePaths.length },
+        }),
+      );
 
       const deleted: string[] = [];
       const skipped: Array<{ file: string; reason: string }> = [];
@@ -1513,12 +1526,14 @@ function createMoveTool(ctx: PluginContext): ToolDefinition {
         ? (args.destination as string)
         : path.resolve(context.directory, args.destination as string);
 
-      await context.ask({
-        permission: "edit",
-        patterns: [filePath, destPath],
-        always: ["*"],
-        metadata: { action: "move" },
-      });
+      await runAsk(
+        context.ask({
+          permission: "edit",
+          patterns: [filePath, destPath],
+          always: ["*"],
+          metadata: { action: "move" },
+        }),
+      );
 
       const result = await callBridge(ctx, context, "move_file", {
         file: filePath,
@@ -1591,7 +1606,11 @@ export function aftPrefixedTools(ctx: PluginContext): Record<string, ToolDefinit
     aft_write: createWriteTool(ctx, "aft_edit"),
     aft_edit: {
       ...aftEditTool,
-      execute: async (args, context): Promise<string> => {
+      // Returns the inner aft_edit tool's result OR a JSON envelope string for
+      // the legacy mode:"write" shim. Newer @opencode-ai/plugin versions
+      // widened ToolResult from `string` to `string | { output, metadata? }`,
+      // so we accept both shapes here; the OpenCode runtime handles both.
+      execute: async (args, context) => {
         const argRecord = args as Record<string, unknown>;
         // Legacy back-compat: callers (mostly older tests/integrations) used
         // `{ mode, file, ... }` instead of the current schema. Translate
@@ -1624,12 +1643,14 @@ export function aftPrefixedTools(ctx: PluginContext): Record<string, ToolDefinit
           const file = normalizedArgs.filePath as string;
           const filePath = path.isAbsolute(file) ? file : path.resolve(context.directory, file);
           const relPath = path.relative(context.worktree, filePath);
-          await context.ask({
-            permission: "edit",
-            patterns: [relPath],
-            always: ["*"],
-            metadata: { filepath: filePath },
-          });
+          await runAsk(
+            context.ask({
+              permission: "edit",
+              patterns: [relPath],
+              always: ["*"],
+              metadata: { filepath: filePath },
+            }),
+          );
           const writeParams: Record<string, unknown> = {
             file: filePath,
             content: normalizedArgs.content as string,

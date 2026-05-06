@@ -5,6 +5,7 @@ import { trackBgTask } from "../bg-notifications.js";
 import { storeToolMetadata } from "../metadata-store.js";
 import type { PluginContext } from "../types.js";
 import { callBridge } from "./_shared.js";
+import { runAsk } from "./permissions.js";
 
 const z = tool.schema;
 const METADATA_PREVIEW_LIMIT = 30 * 1024;
@@ -35,12 +36,14 @@ async function withPermissionLoop(
   const permissionsGranted: string[] = [];
   for (const ask of asks) {
     const permission = ask.kind === "external_directory" ? "external_directory" : "bash";
-    await runtime.ask({
-      permission,
-      patterns: ask.patterns,
-      always: ask.always,
-      metadata: {},
-    });
+    await runAsk(
+      runtime.ask({
+        permission,
+        patterns: ask.patterns,
+        always: ask.always,
+        metadata: {},
+      }),
+    );
     permissionsGranted.push(...(ask.always.length > 0 ? ask.always : ask.patterns));
   }
 
