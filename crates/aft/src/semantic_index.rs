@@ -2326,7 +2326,7 @@ mod tests {
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         write_rust_file(&file, "kept_symbol");
 
-        let mut index = build_test_index(project_root, &[file.clone()]);
+        let mut index = build_test_index(project_root, std::slice::from_ref(&file));
         let original_entry_count = index.entries.len();
         let original_mtime = *index.file_mtimes.get(&file).unwrap();
         let original_size = *index.file_sizes.get(&file).unwrap();
@@ -2338,7 +2338,13 @@ mod tests {
         let mut embed = test_vector_for_texts;
         let mut progress = |_done: usize, _total: usize| {};
         let summary = index
-            .refresh_stale_files(project_root, &[file.clone()], &mut embed, 8, &mut progress)
+            .refresh_stale_files(
+                project_root,
+                std::slice::from_ref(&file),
+                &mut embed,
+                8,
+                &mut progress,
+            )
             .unwrap();
 
         assert_eq!(summary.changed, 0);
@@ -2364,7 +2370,7 @@ mod tests {
         let summary = index
             .refresh_stale_files(
                 project_root,
-                &[missing.clone()],
+                std::slice::from_ref(&missing),
                 &mut embed,
                 8,
                 &mut progress,
@@ -2389,7 +2395,7 @@ mod tests {
         write_rust_file(&existing, "existing_symbol");
         write_rust_file(&added, "added_symbol");
 
-        let mut index = build_test_index(project_root, &[existing.clone()]);
+        let mut index = build_test_index(project_root, std::slice::from_ref(&existing));
         let mut embed = test_vector_for_texts;
         let mut progress = |_done: usize, _total: usize| {};
         let summary = index
@@ -2418,7 +2424,7 @@ mod tests {
         fs::create_dir_all(deleted.parent().unwrap()).unwrap();
         write_rust_file(&deleted, "deleted_symbol");
 
-        let mut index = build_test_index(project_root, &[deleted.clone()]);
+        let mut index = build_test_index(project_root, std::slice::from_ref(&deleted));
         fs::remove_file(&deleted).unwrap();
 
         let mut embed = test_vector_for_texts;
@@ -2443,14 +2449,20 @@ mod tests {
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         write_rust_file(&file, "old_symbol");
 
-        let mut index = build_test_index(project_root, &[file.clone()]);
+        let mut index = build_test_index(project_root, std::slice::from_ref(&file));
         set_file_metadata(&mut index, &file, SystemTime::UNIX_EPOCH, 0);
         write_rust_file(&file, "new_symbol");
 
         let mut embed = test_vector_for_texts;
         let mut progress = |_done: usize, _total: usize| {};
         let summary = index
-            .refresh_stale_files(project_root, &[file.clone()], &mut embed, 8, &mut progress)
+            .refresh_stale_files(
+                project_root,
+                std::slice::from_ref(&file),
+                &mut embed,
+                8,
+                &mut progress,
+            )
             .unwrap();
 
         assert_eq!(summary.changed, 1);
@@ -2475,7 +2487,7 @@ mod tests {
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         write_rust_file(&file, "clean_symbol");
 
-        let mut index = build_test_index(project_root, &[file.clone()]);
+        let mut index = build_test_index(project_root, std::slice::from_ref(&file));
         let original_entries = index.entries.len();
         let mut embed_called = false;
         let mut embed = |texts: Vec<String>| {
@@ -2484,7 +2496,13 @@ mod tests {
         };
         let mut progress = |_done: usize, _total: usize| {};
         let summary = index
-            .refresh_stale_files(project_root, &[file.clone()], &mut embed, 8, &mut progress)
+            .refresh_stale_files(
+                project_root,
+                std::slice::from_ref(&file),
+                &mut embed,
+                8,
+                &mut progress,
+            )
             .unwrap();
 
         assert!(summary.is_noop());

@@ -43,7 +43,7 @@ impl WindowsShell {
     /// PowerShell variants take `-Command <string>`; cmd takes `/D /C <string>`
     /// (`/D` disables AutoRun macros that could otherwise inject env-trust
     /// behavior into our isolated invocation).
-    pub(crate) fn args<'a>(self, command: &'a str) -> Vec<&'a str> {
+    pub(crate) fn args(self, command: &str) -> Vec<&str> {
         match self {
             WindowsShell::Pwsh | WindowsShell::Powershell => vec![
                 "-NoLogo",

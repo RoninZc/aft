@@ -194,7 +194,7 @@ fn refresh_drops_entries_for_files_no_longer_in_walk() {
     let summary = index
         .refresh_stale_files(
             project.path(),
-            &[file_a.clone()],
+            std::slice::from_ref(&file_a),
             &mut embed,
             16,
             &mut progress,

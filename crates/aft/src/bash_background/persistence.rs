@@ -209,6 +209,20 @@ fn sanitize_task_id(task_id: &str) -> String {
         .collect()
 }
 
+pub fn create_capture_file(path: &Path) -> io::Result<File> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    File::create(path)
+}
+
+pub fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use std::thread;
@@ -235,18 +249,4 @@ mod tests {
             .join(format!(".task.json.tmp.{}", std::process::id()))
             .exists());
     }
-}
-
-pub fn create_capture_file(path: &Path) -> io::Result<File> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    File::create(path)
-}
-
-pub fn unix_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
 }
