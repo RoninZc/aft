@@ -141,6 +141,41 @@ describe("bash tool adapter", () => {
     expect(result.details.duration_ms).toBe(100);
   });
 
+  test("background bash shapes timeout transport options and started message", async () => {
+    const tools = new Map<string, MockToolDef>();
+    const api = makeMockApi(tools);
+    const { bridge, calls } = makeTrackableMockBridge({
+      status: "running",
+      task_id: "bgb-123",
+      duration_ms: 5,
+    });
+    const ctx = makeMockContext(bridge);
+
+    registerBashTool(api, ctx);
+
+    const bashTool = tools.get("bash")!;
+    const result = (await bashTool.execute(
+      "test-call",
+      { command: "bun test", timeout: 40_000, background: true, compressed: false },
+      undefined,
+      undefined,
+      { cwd: "/test" },
+    )) as { content: Array<{ text: string }>; details: Record<string, unknown> };
+
+    const callArgs = calls[0] as [string, Record<string, unknown>, Record<string, unknown>];
+    expect(callArgs[0]).toBe("bash");
+    expect(callArgs[1]).toMatchObject({
+      command: "bun test",
+      timeout: 40_000,
+      background: true,
+      compressed: false,
+    });
+    expect(callArgs[2].transportTimeoutMs).toBe(45_000);
+    expect(callArgs[2].keepBridgeOnTimeout).toBe(true);
+    expect(result.content[0].text).toContain("Background task started: bgb-123");
+    expect(result.details.task_id).toBe("bgb-123");
+  });
+
   test("BashSpawnHook modifies command before bridge call", async () => {
     const tools = new Map<string, MockToolDef>();
 
@@ -513,5 +548,33 @@ describe("registerBashTool gating of bash_status/bash_kill", () => {
     expect(tools.get("bash")).toBeDefined();
     expect(tools.get("bash_status")).toBeDefined();
     expect(tools.get("bash_kill")).toBeDefined();
+  });
+
+  test("bash_status and bash_kill execute with task_id request shape", async () => {
+    const tools = new Map<string, MockToolDef>();
+    const api = makeMockApi(tools);
+    const { bridge, calls } = makeTrackableMockBridge({ status: "completed", exit_code: 0 });
+    const ctx: PluginContext = {
+      pool: { getBridge: () => bridge } as unknown as PluginContext["pool"],
+      config: { experimental: { bash: { background: true } } } as PluginContext["config"],
+      storageDir: "/tmp/test",
+    };
+    registerBashTool(api, ctx);
+
+    await tools
+      .get("bash_status")!
+      .execute("status-call", { task_id: "bgb-123" }, undefined, undefined, {
+        cwd: "/test",
+      });
+    await tools
+      .get("bash_kill")!
+      .execute("kill-call", { task_id: "bgb-123" }, undefined, undefined, {
+        cwd: "/test",
+      });
+
+    expect((calls[0] as [string, Record<string, unknown>])[0]).toBe("bash_status");
+    expect((calls[0] as [string, Record<string, unknown>])[1]).toEqual({ task_id: "bgb-123" });
+    expect((calls[1] as [string, Record<string, unknown>])[0]).toBe("bash_kill");
+    expect((calls[1] as [string, Record<string, unknown>])[1]).toEqual({ task_id: "bgb-123" });
   });
 });
