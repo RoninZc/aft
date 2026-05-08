@@ -7,7 +7,13 @@ use serde_json::json;
 use crate::context::AppContext;
 use crate::protocol::{RawRequest, Response, ERROR_PERMISSION_REQUIRED};
 
-const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+// Foreground bash no longer has a 30s default kill cap. When `params.timeout`
+// is `None`, the spawn path passes `None` through and the registry applies
+// `DEFAULT_BG_TIMEOUT` (30 min) — same default as explicit `background: true`.
+// The "agent should expect a 30s wait" UX is now enforced purely in the plugin
+// layer's polling wait-window, decoupled from the task budget. See council
+// decision in .alfonso/athena/council-aft-bash-timeout-design-5f25c3ee503ab303/
+// for the full rationale.
 #[cfg(test)]
 const INLINE_OUTPUT_LIMIT: usize = 30 * 1024;
 const BLOCKED_ENV_VARS: &[&str] = &[
@@ -114,7 +120,7 @@ pub fn handle(req: &RawRequest, ctx: &AppContext) -> Response {
         &params.command,
         workdir,
         env,
-        params.timeout.or(Some(DEFAULT_TIMEOUT_MS)),
+        params.timeout,
         ctx,
         params.background,
         params.notify_on_completion,

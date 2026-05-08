@@ -9,9 +9,20 @@ import { runAsk } from "./permissions.js";
 
 const z = tool.schema;
 const METADATA_PREVIEW_LIMIT = 30 * 1024;
-const DEFAULT_BASH_TIMEOUT_MS = 30_000;
-const BASH_TRANSPORT_TIMEOUT_OVERHEAD_MS = 5_000;
+// Foreground polling wait-window: how long the plugin blocks the agent before
+// promoting the task to background and returning. INTENTIONALLY decoupled
+// from the task's own kill cap (`args.timeout`). Council decision:
+// .alfonso/athena/council-aft-bash-timeout-design-5f25c3ee503ab303/
+const FOREGROUND_WAIT_WINDOW_MS = 5_000;
 const FOREGROUND_POLL_INTERVAL_MS = 100;
+// Bridge transport timeout for `bash` calls. The Rust handler returns a
+// `running` status immediately and the plugin polls separately, so transport
+// only needs to cover spawn + protocol round-trip. 30s is conservative for
+// Rust-side spawn (project_root resolution, bash_background registry write,
+// LSP integration overhead). NOT a function of args.timeout — explicit short
+// timeouts kill the task in Rust, not via transport. See council audit
+// `.alfonso/athena/council-aft-bash-timeout-audit-057818e1583d3883/`.
+const BASH_TRANSPORT_TIMEOUT_MS = 30_000;
 
 const BASH_DESCRIPTION = `Hoisted bash tool with output compression, command rewriting to AFT tools, and optional background execution. By default, output is compressed; pass compressed: false for raw output. Pass background: true to spawn in the background and get a task_id for bash_status/bash_kill.`;
 
@@ -72,9 +83,11 @@ export function createBashTool(ctx: PluginContext): ToolDefinition {
         ),
       timeout: z
         .number()
+        .int()
+        .positive()
         .optional()
         .describe(
-          "Maximum execution time in milliseconds for foreground commands. Defaults to 30000 (30 seconds) when omitted. For commands expected to run longer than 30s (builds, installs, full test suites), use background: true instead.",
+          "Hard kill cap in milliseconds (positive integer). When omitted, the task can run up to 30 minutes. Foreground bash returns inline if the command finishes within ~5s; otherwise it's automatically promoted to background and a completion reminder is delivered when the task actually finishes.",
         ),
       workdir: z
         .string()
@@ -129,7 +142,7 @@ export function createBashTool(ctx: PluginContext): ToolDefinition {
         },
         callBridge,
         {
-          transportTimeoutMs: bashTransportTimeoutMs(args.timeout as number | undefined),
+          transportTimeoutMs: BASH_TRANSPORT_TIMEOUT_MS,
           // Rust bash has its own watchdog that kills the child shell on the
           // bash-level timeout (`args.timeout`) and returns a normal timed_out
           // response well before our transport timeout fires. If we hit the
@@ -164,7 +177,18 @@ export function createBashTool(ctx: PluginContext): ToolDefinition {
           return startedLine;
         }
 
-        const waitTimeoutMs = (args.timeout as number | undefined) ?? DEFAULT_BASH_TIMEOUT_MS;
+        // Wait-window is decoupled from `args.timeout`. We always cap the
+        // foreground polling window at FOREGROUND_WAIT_WINDOW_MS so agents
+        // get a fast "promoted" response for unexpectedly long commands. If
+        // the agent passed a shorter explicit `timeout`, honor that — there's
+        // no point polling longer than the task can possibly survive. Schema
+        // validation guarantees `args.timeout` is a positive integer or
+        // undefined, so this Math.min is always well-defined.
+        const argTimeout = args.timeout as number | undefined;
+        const waitTimeoutMs =
+          argTimeout !== undefined
+            ? Math.min(argTimeout, FOREGROUND_WAIT_WINDOW_MS)
+            : FOREGROUND_WAIT_WINDOW_MS;
         const startedAt = Date.now();
         while (true) {
           const status = await callBridge(ctx, context, "bash_status", { task_id: taskId });
@@ -189,11 +213,7 @@ export function createBashTool(ctx: PluginContext): ToolDefinition {
               throw new Error((promoted.message as string | undefined) ?? "bash_promote failed");
             }
             trackBgTask(context.sessionID, taskId);
-            const message = formatPromotionMessage(
-              taskId,
-              command,
-              args.timeout as number | undefined,
-            );
+            const message = formatPromotionMessage(taskId, args.timeout as number | undefined);
             const metadataPayload = { description, output: message, status: "running", taskId };
             metadata?.(metadataPayload);
             if (callID) {
@@ -313,11 +333,6 @@ export function createBashKillTool(ctx: PluginContext): ToolDefinition {
   };
 }
 
-function bashTransportTimeoutMs(timeout: number | undefined): number {
-  const bashTimeout = timeout ?? DEFAULT_BASH_TIMEOUT_MS;
-  return Math.max(30_000, bashTimeout + BASH_TRANSPORT_TIMEOUT_OVERHEAD_MS);
-}
-
 function preview(output: string): string {
   return output.length <= METADATA_PREVIEW_LIMIT ? output : output.slice(-METADATA_PREVIEW_LIMIT);
 }
@@ -332,13 +347,17 @@ function formatBackgroundLaunch(taskId: string): string {
   return `Background task started: ${taskId}. A completion reminder will be delivered automatically; don't poll bash_status.`;
 }
 
-function formatPromotionMessage(
-  taskId: string,
-  command: string,
-  timeout: number | undefined,
-): string {
-  const waited = timeout ?? DEFAULT_BASH_TIMEOUT_MS;
-  return `Foreground bash exceeded ${waited}ms and was promoted to background: ${taskId}. A completion reminder will be delivered automatically; use bash_status({ taskId: "${taskId}" }) to inspect output or bash_kill({ taskId: "${taskId}" }) to terminate. Command: ${shortenCommand(command)}`;
+function formatPromotionMessage(taskId: string, timeout: number | undefined): string {
+  // We waited up to FOREGROUND_WAIT_WINDOW_MS, or shorter if the agent's
+  // explicit timeout capped us first. Report the actual elapsed wait so the
+  // message is accurate. We do NOT echo the original command back — the
+  // agent already has it in its own tool-call args, and bash_status returns
+  // it on demand.
+  const waited =
+    timeout !== undefined
+      ? Math.min(timeout, FOREGROUND_WAIT_WINDOW_MS)
+      : FOREGROUND_WAIT_WINDOW_MS;
+  return `Foreground bash didn't finish within ${waited}ms and was promoted to background: ${taskId}. A completion reminder will be delivered automatically; use bash_status({ taskId: "${taskId}" }) to inspect output or bash_kill({ taskId: "${taskId}" }) to terminate.`;
 }
 
 function formatForegroundResult(data: Record<string, unknown>): string {

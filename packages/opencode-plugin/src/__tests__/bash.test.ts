@@ -167,7 +167,14 @@ describe("OpenCode bash adapter", () => {
     expect(calls[0].params.env).toEqual({ FOO: "bar", TOKEN: "redacted" });
   });
 
-  test("large bash timeout scales bridge transport timeout with overhead", async () => {
+  test("transport timeout is bounded by wait-window, not user-supplied task budget", async () => {
+    // After the v0.20+ foreground-as-polled-background architecture, the
+    // Rust `bash` call returns a `running` status immediately — it does NOT
+    // block until the child exits. The transport timeout therefore covers
+    // only spawn + protocol round-trip, not the full task budget. A user
+    // asking for `timeout: 600_000` (10-minute kill cap) still gets the
+    // 30s baseline transport budget because the bridge call returns fast
+    // and the long task survives in the background after promotion.
     const { calls, tool: bash } = createHarness(() => ({
       success: true,
       output: "built",
@@ -178,8 +185,11 @@ describe("OpenCode bash adapter", () => {
     await bash.execute({ command: "cargo build", timeout: 600_000 }, createMockSdkContext());
 
     expect(calls).toHaveLength(1);
+    // The user's kill cap still propagates to Rust as the task timeout.
     expect(calls[0].params.timeout).toBe(600_000);
-    expect(calls[0].options?.transportTimeoutMs).toBe(605_000);
+    // But transport timeout is the 30s baseline — wait-window (5s) plus
+    // overhead (5s) is well below the floor.
+    expect(calls[0].options?.transportTimeoutMs).toBe(30_000);
   });
 
   test("progress callback forwards rolling output previews through ctx.metadata", async () => {

@@ -30,7 +30,7 @@ describe("buildWorkflowHints", () => {
     expect(out).toContain("do not poll");
   });
 
-  test("shows 30s timeout warning when background bash is off but bash is available", () => {
+  test("omits long-running bash hint when background bash is off (foreground auto-promotes)", () => {
     const out = buildWorkflowHints({
       toolSurface: "recommended",
       hoistBuiltins: true,
@@ -39,11 +39,13 @@ describe("buildWorkflowHints", () => {
       disabledTools: new Set(),
     });
     expect(out).not.toBeNull();
-    // Background pattern not shown — but 30s limit IS shown
+    // Foreground bash now auto-promotes after a short wait-window, so we
+    // don't need to teach the agent about timeouts up front. The bash hint
+    // section is gone entirely when bg-bash is disabled.
     expect(out).not.toContain("background: true");
     expect(out).not.toContain("**Long-running commands**");
-    expect(out).toContain("**Long-running bash commands**");
-    expect(out).toContain("30 seconds");
+    expect(out).not.toContain("**Long-running bash commands**");
+    expect(out).not.toContain("30 seconds");
   });
 
   test("omits the navigate section at tool_surface=recommended", () => {
@@ -119,10 +121,11 @@ describe("buildWorkflowHints", () => {
     });
     // navigate section gated off (aft_navigate disabled).
     expect(out).not.toContain("Use `aft_navigate`");
-    // bg-bash section gated off (bash_status disabled) — falls back to 30s warning.
+    // bg-bash section gated off (bash_status disabled) — and there's no
+    // 30s fallback anymore, foreground bash auto-promotes silently.
     expect(out).not.toContain("**Long-running commands**");
-    expect(out).toContain("**Long-running bash commands**");
-    expect(out).toContain("30 seconds");
+    expect(out).not.toContain("**Long-running bash commands**");
+    expect(out).not.toContain("30 seconds");
     // Other sections survive.
     expect(out).toContain("**Web/URL access**");
     expect(out).toContain("**Code exploration**");

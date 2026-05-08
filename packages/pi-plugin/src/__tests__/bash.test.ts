@@ -141,7 +141,11 @@ describe("bash tool adapter", () => {
     expect(result.details.duration_ms).toBe(100);
   });
 
-  test("background bash shapes timeout transport options and started message", async () => {
+  test("background bash forwards user kill cap and uses 30s baseline transport budget", async () => {
+    // Post-v0.20+ the Rust `bash` call returns `running` immediately, so
+    // transport timeout is bounded by spawn + protocol round-trip, not the
+    // task budget. A 40s `timeout` still propagates as the task kill cap
+    // but transport stays at the 30s baseline.
     const tools = new Map<string, MockToolDef>();
     const api = makeMockApi(tools);
     const { bridge, calls } = makeTrackableMockBridge({
@@ -171,7 +175,8 @@ describe("bash tool adapter", () => {
       notify_on_completion: true,
       compressed: false,
     });
-    expect(callArgs[2].transportTimeoutMs).toBe(45_000);
+    // 30s baseline: wait-window (5s) + overhead (5s) is below the floor.
+    expect(callArgs[2].transportTimeoutMs).toBe(30_000);
     expect(callArgs[2].keepBridgeOnTimeout).toBe(true);
     expect(result.content[0].text).toContain("Background task started: bgb-123");
     expect(result.details.task_id).toBe("bgb-123");
@@ -552,24 +557,22 @@ describe("bash tool adapter", () => {
 });
 
 /**
- * Verify the bash_status / bash_kill gating inside `registerBashTool`.
+ * Verify that `bash_status` and `bash_kill` are always registered alongside
+ * `bash` inside `registerBashTool`, regardless of which experimental.bash.*
+ * flag enabled the outer gate.
  *
  * The outer gate (whether `registerBashTool` is called at all) lives in
  * Pi's `index.ts` and depends on any `experimental.bash.*` flag being set.
- * The inner gate, tested here, controls whether the *background-only*
- * sibling tools (`bash_status` / `bash_kill`) get registered alongside the
- * primary `bash` tool — they only have meaning for background tasks, so
- * registering them when `experimental.bash.background` is off would just
- * add dead surface area to the agent's tool list.
- *
- * The bash hoisting gate test in OpenCode covers the equivalent outer gate.
- * Pi's outer gate lives in `index.ts` (not in this file's surface), but the
- * logic is a straight or-of-three of the same nested config keys so the
- * OpenCode coverage transfers. The inner gate below is Pi-specific
- * because Pi puts `bash_status` / `bash_kill` inside `registerBashTool`
- * rather than alongside it.
+ * Once that gate passes, the bash subsystem registers all three tools as a
+ * unit because foreground bash auto-promotes long-running tasks to
+ * background after a short wait-window — the agent always needs a way to
+ * inspect or kill a promoted task. Earlier versions gated status/kill on
+ * `experimental.bash.background` specifically, which left the agent with a
+ * promotion message referencing tools that didn't exist for users who only
+ * opted into rewrite/compress. (See council audit
+ * `.alfonso/athena/council-aft-bash-timeout-audit-057818e1583d3883/`.)
  */
-describe("registerBashTool gating of bash_status/bash_kill", () => {
+describe("registerBashTool registers bash + bash_status + bash_kill as a unit", () => {
   function registerWithBashConfig(bash: Record<string, boolean> | undefined) {
     const tools = new Map<string, MockToolDef>();
     const api = makeMockApi(tools);
@@ -583,38 +586,39 @@ describe("registerBashTool gating of bash_status/bash_kill", () => {
     return tools;
   }
 
-  test("no experimental.bash → bash registered (caller already gated), no bash_status/bash_kill", () => {
+  test("no experimental.bash config → all three tools registered (caller already gated)", () => {
     // registerBashTool is called by the caller — caller does the outer gate.
-    // The function itself always registers `bash`; only the background siblings
-    // require the explicit background flag.
+    // The function itself unconditionally registers all three.
     const tools = registerWithBashConfig(undefined);
     expect(tools.get("bash")).toBeDefined();
-    expect(tools.get("bash_status")).toBeUndefined();
-    expect(tools.get("bash_kill")).toBeUndefined();
+    expect(tools.get("bash_status")).toBeDefined();
+    expect(tools.get("bash_kill")).toBeDefined();
   });
 
-  test("experimental.bash.rewrite=true → bash registered, but NOT bash_status/bash_kill", () => {
+  test("experimental.bash.rewrite=true alone → bash_status and bash_kill still registered", () => {
+    // Foreground bash can still auto-promote even without the background
+    // flag, so status/kill must be available for the promoted task.
     const tools = registerWithBashConfig({ rewrite: true });
     expect(tools.get("bash")).toBeDefined();
-    expect(tools.get("bash_status")).toBeUndefined();
-    expect(tools.get("bash_kill")).toBeUndefined();
+    expect(tools.get("bash_status")).toBeDefined();
+    expect(tools.get("bash_kill")).toBeDefined();
   });
 
-  test("experimental.bash.compress=true alone → no background siblings", () => {
+  test("experimental.bash.compress=true alone → bash_status and bash_kill still registered", () => {
     const tools = registerWithBashConfig({ compress: true });
     expect(tools.get("bash")).toBeDefined();
-    expect(tools.get("bash_status")).toBeUndefined();
-    expect(tools.get("bash_kill")).toBeUndefined();
+    expect(tools.get("bash_status")).toBeDefined();
+    expect(tools.get("bash_kill")).toBeDefined();
   });
 
-  test("experimental.bash.background=true → bash_status AND bash_kill registered", () => {
+  test("experimental.bash.background=true → all three tools registered", () => {
     const tools = registerWithBashConfig({ background: true });
     expect(tools.get("bash")).toBeDefined();
     expect(tools.get("bash_status")).toBeDefined();
     expect(tools.get("bash_kill")).toBeDefined();
   });
 
-  test("all three flags true → full bash surface registered", () => {
+  test("all three flags true → all three tools registered", () => {
     const tools = registerWithBashConfig({ rewrite: true, compress: true, background: true });
     expect(tools.get("bash")).toBeDefined();
     expect(tools.get("bash_status")).toBeDefined();

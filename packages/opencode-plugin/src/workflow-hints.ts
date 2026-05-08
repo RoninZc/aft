@@ -85,19 +85,14 @@ export function buildWorkflowHints(opts: WorkflowHintsOpts): string | null {
     );
   }
 
-  // Bash timeout guidance — always show when bash is available so agents
-  // know the 30s default and don't get surprised by timed-out commands.
-  // When background bash is enabled, add the background invocation pattern.
-  if (hasBash) {
-    if (hasBgBash) {
-      sections.push(
-        `**Long-running commands** (builds, installs, full test suites): \`${bashName}({ background: true })\` returns immediately with a \`taskId\`. A completion reminder is delivered automatically — do not poll \`${bashStatusName}({ taskId })\`. Use \`${bashStatusName}\` only after the reminder arrives, or to inspect a task you already know is complete.`,
-      );
-    } else {
-      sections.push(
-        `**Long-running bash commands**: foreground \`${bashName}\` times out after 30 seconds. Pass \`timeout\` in milliseconds to extend it for commands you know will take longer.`,
-      );
-    }
+  // Bash long-running guidance — only add the background-pattern hint when
+  // background bash is enabled. Foreground bash now auto-promotes after a
+  // short wait-window, so agents never need to know about timeouts up front;
+  // there's no "30s default" to warn about anymore.
+  if (hasBash && hasBgBash) {
+    sections.push(
+      `**Long-running commands** (builds, installs, full test suites): \`${bashName}({ background: true })\` returns immediately with a \`taskId\`. A completion reminder is delivered automatically — do not poll \`${bashStatusName}({ taskId })\`. Use \`${bashStatusName}\` only after the reminder arrives, or to inspect a task you already know is complete.`,
+    );
   }
 
   if (sections.length === 0) {

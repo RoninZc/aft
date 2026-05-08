@@ -1555,13 +1555,18 @@ function createMoveTool(ctx: PluginContext): ToolDefinition {
  * Returns hoisted tools keyed by opencode's built-in names.
  * Overrides: read, write, edit, apply_patch (always when hoisting is on).
  *
- * Bash hoisting is opt-in: `bash`, `bash_status`, and `bash_kill` are only
- * registered when at least one `experimental.bash.*` flag is enabled
- * (rewrite, compress, or background). When all flags are off, opencode's
- * native bash stays in place — users without bash experimentals get zero
- * AFT code in their bash path. `bash_status` and `bash_kill` register
- * specifically when `experimental.bash.background` is true, since those
- * tools only have meaning for background tasks.
+ * Bash hoisting is opt-in: `bash`, `bash_status`, and `bash_kill` are
+ * registered together when at least one `experimental.bash.*` flag is
+ * enabled (rewrite, compress, or background). When all flags are off,
+ * opencode's native bash stays in place — users without bash experimentals
+ * get zero AFT code in their bash path.
+ *
+ * `bash_status` and `bash_kill` ride alongside `bash` regardless of which
+ * experimental flag enabled it: foreground bash auto-promotes long-running
+ * tasks to background after a short wait-window (v0.20+), so the agent
+ * always needs a way to inspect or kill those promoted tasks. The
+ * `experimental.bash.background` flag only gates explicit
+ * `bash({ background: true })` spawning, not promotion.
  */
 export function hoistedTools(ctx: PluginContext): Record<string, ToolDefinition> {
   const tools: Record<string, ToolDefinition> = {
@@ -1582,8 +1587,6 @@ export function hoistedTools(ctx: PluginContext): Record<string, ToolDefinition>
 
   if (anyBashExperimental) {
     tools.bash = createBashTool(ctx);
-  }
-  if (bashBackground) {
     tools.bash_status = createBashStatusTool(ctx);
     tools.bash_kill = createBashKillTool(ctx);
   }
