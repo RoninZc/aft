@@ -47,7 +47,11 @@ import {
 } from "./notifications.js";
 import { getLastAssistantModel } from "./shared/last-assistant-model.js";
 import { AftRpcServer } from "./shared/rpc-server.js";
-import { clearSharedBridgePool, setSharedBridgePool } from "./shared/runtime.js";
+import {
+  clearSharedBridgePool,
+  getOrInitPluginState,
+  setSharedBridgePool,
+} from "./shared/runtime.js";
 import {
   getSessionDirectory,
   getSessionDirectoryCached,
@@ -201,7 +205,29 @@ const ANNOUNCEMENT_FEATURES: string[] = [
  * - Refactoring: aft_refactor
  * - LSP: aft_lsp_diagnostics (inline diagnostics on edits are automatic)
  */
+type AftHooksReturn = Awaited<ReturnType<typeof initializePluginForDirectory>>;
+
 const plugin: Plugin = async (input) => {
+  // Defend against OpenCode loading our bundle twice (different module
+  // instances, same canonical project directory). Without this guard, the
+  // second invocation would spawn its own BridgePool + AftRpcServer and
+  // OpenCode's `for (const hook of hooks)` iteration would fire every
+  // tool.execute.after/event/config callback twice. See shared/runtime.ts
+  // for the cache implementation.
+  const { value: hooks, isFirst } = await getOrInitPluginState<AftHooksReturn>(
+    input.directory,
+    () => initializePluginForDirectory(input),
+  );
+  if (!isFirst) {
+    warn(
+      "Duplicate plugin init detected (OpenCode invoked plugin(input) more than once for the same project). Returning empty hooks to avoid double-firing callbacks; the first init owns the bridge pool and RPC server.",
+    );
+    return {};
+  }
+  return hooks;
+};
+
+async function initializePluginForDirectory(input: Parameters<Plugin>[0]) {
   const binaryPath = await findBinary();
 
   // Load config: ~/.config/opencode/aft.jsonc → <project>/.opencode/aft.jsonc
@@ -918,7 +944,7 @@ const plugin: Plugin = async (input) => {
         output,
       );
     },
-    config: async (config) => {
+    config: async (config: { command?: Record<string, unknown> } | undefined) => {
       // Defensive guard: if OpenCode passes undefined or a non-object,
       // skip silently rather than crashing the plugin loader. The crash
       // surface here was responsible for `S.provider`/`z.config` errors
@@ -944,6 +970,6 @@ const plugin: Plugin = async (input) => {
       await pool.shutdown();
     },
   };
-};
+}
 
 export default plugin;
