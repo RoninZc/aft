@@ -141,6 +141,16 @@ export async function appendToolResultBgCompletions(
   const reminder = formatCombinedSystemReminder(state.pendingCompletions, state.pendingLongRunning);
   state.pendingCompletions = [];
   state.pendingLongRunning = [];
+  // Cancel any pending debounced wake — its captured pendingCompletions /
+  // pendingLongRunning are now drained, and firing the timer anyway would
+  // build an empty-body "[BACKGROUND BASH STILL RUNNING]" reminder.
+  if (state.debounceTimer) {
+    clearTimeout(state.debounceTimer);
+    state.debounceTimer = null;
+    state.firstCompletionAt = null;
+    state.scheduledFireAt = null;
+    state.scheduledCompletionCount = 0;
+  }
   return [...content, { type: "text", text: reminder }];
 }
 
@@ -288,13 +298,18 @@ function scheduleWake(
   state.debounceTimer = setTimeout(() => {
     const pending = state.pendingCompletions;
     const pendingLongRunning = state.pendingLongRunning;
-    const reminder = formatCombinedSystemReminder(pending, pendingLongRunning);
-    state.pendingCompletions = [];
-    state.pendingLongRunning = [];
     state.debounceTimer = null;
     state.firstCompletionAt = null;
     state.scheduledFireAt = null;
     state.scheduledCompletionCount = 0;
+    // Defensive: if another path (e.g. appendToolResultBgCompletions)
+    // drained the pending arrays between schedule and fire and didn't
+    // cancel us, just skip — don't ship an empty
+    // "[BACKGROUND BASH STILL RUNNING]" shell.
+    if (pending.length === 0 && pendingLongRunning.length === 0) return;
+    const reminder = formatCombinedSystemReminder(pending, pendingLongRunning);
+    state.pendingCompletions = [];
+    state.pendingLongRunning = [];
     void sendWake(reminder)
       .then(() => {
         state.retryDelayMs = null;
