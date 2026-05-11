@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ToolContext } from "@opencode-ai/plugin";
 import { Effect } from "effect";
@@ -86,6 +87,71 @@ function containsPath(parent: string, child: string): boolean {
 }
 
 /**
+ * Convert POSIX-style drive paths to Windows drive paths.
+ *
+ * Mirrors `AppFileSystem.windowsPath` in opencode core — these forms can
+ * leak into our input from Git Bash, Cygwin, and WSL conversions:
+ *
+ *   `/c/Users/...`         → `C:/Users/...`
+ *   `/cygdrive/c/...`      → `C:/...`
+ *   `/mnt/c/...`           → `C:/...`
+ *
+ * No-op on non-Windows.
+ */
+function windowsPath(p: string): string {
+  if (process.platform !== "win32") return p;
+  return p
+    .replace(/^\/([a-zA-Z]):(?:[\\/]|$)/, (_, drive) => `${drive.toUpperCase()}:/`)
+    .replace(/^\/([a-zA-Z])(?:\/|$)/, (_, drive) => `${drive.toUpperCase()}:/`)
+    .replace(/^\/cygdrive\/([a-zA-Z])(?:\/|$)/, (_, drive) => `${drive.toUpperCase()}:/`)
+    .replace(/^\/mnt\/([a-zA-Z])(?:\/|$)/, (_, drive) => `${drive.toUpperCase()}:/`);
+}
+
+/**
+ * Normalize a path so containsPath() comparisons and external_directory
+ * glob construction work consistently on Windows.
+ *
+ * Mirrors `AppFileSystem.normalizePath` in opencode core: on Windows,
+ * applies POSIX→Windows drive translation, resolves to absolute, then
+ * `realpathSync.native` to follow symlinks and canonicalize the drive
+ * letter case. Falls back to the resolved path when the target doesn't
+ * exist (writes to new files have to ask permission BEFORE creating).
+ *
+ * No-op on non-Windows so macOS/Linux behavior is unchanged.
+ */
+function normalizePath(p: string): string {
+  if (process.platform !== "win32") return p;
+  const resolved = path.resolve(windowsPath(p));
+  try {
+    return fs.realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+/**
+ * Normalize a path pattern (which may end in `*`) for the same reasons
+ * normalizePath() exists, but without trying to realpath a pattern that
+ * doesn't correspond to a real entry.
+ *
+ * Mirrors `AppFileSystem.normalizePathPattern` in opencode core.
+ *
+ *   `*`                 → `*`
+ *   `~/projects/*`      → `~/projects/*`  (`~` is expanded by opencode's matcher)
+ *   `C:\some\dir\*`     → `C:\some\dir\*` (drive case canonicalized via realpath of the dir part)
+ *
+ * No-op on non-Windows.
+ */
+function normalizePathPattern(p: string): string {
+  if (process.platform !== "win32") return p;
+  if (p === "*") return p;
+  const match = p.match(/^(.*)[\\/]\*$/);
+  if (!match) return normalizePath(p);
+  const dir = /^[A-Za-z]:$/.test(match[1]) ? `${match[1]}\\` : match[1];
+  return path.join(normalizePath(dir), "*");
+}
+
+/**
  * Trigger OpenCode's host-side `external_directory` permission check when the
  * target path falls outside the current project's directory and worktree.
  * Mirrors `opencode/src/tool/external-directory.ts::assertExternalDirectoryEffect`.
@@ -112,10 +178,16 @@ export async function assertExternalDirectoryPermission(
 ): Promise<string | undefined> {
   if (!target) return undefined;
 
-  const absoluteTarget = path.isAbsolute(target) ? target : path.resolve(context.directory, target);
+  const resolved = path.isAbsolute(target) ? target : path.resolve(context.directory, target);
+  // Windows: realpath + drive-case normalize so containsPath comparisons line
+  // up regardless of how the agent typed the path (`C:/...` vs `/c/...` vs
+  // `/cygdrive/c/...`). No-op on macOS/Linux.
+  const absoluteTarget = normalizePath(resolved);
 
-  const directory = context.directory;
-  const worktree = (context as { worktree?: string }).worktree;
+  const directory = context.directory ? normalizePath(context.directory) : context.directory;
+  const rawWorktree = (context as { worktree?: string }).worktree;
+  const worktree = rawWorktree && rawWorktree !== "/" ? normalizePath(rawWorktree) : rawWorktree;
+
   if (directory && containsPath(directory, absoluteTarget)) return undefined;
   // Non-git projects set worktree to "/" which matches ANY absolute path.
   // Match opencode's behavior: skip the worktree check in that case so we
@@ -131,14 +203,17 @@ export async function assertExternalDirectoryPermission(
 
   const kind = options?.kind ?? "file";
   const parentDir = kind === "directory" ? absoluteTarget : path.dirname(absoluteTarget);
-  const glob = path.join(parentDir, "*").replaceAll("\\", "/");
+  const rawGlob =
+    process.platform === "win32"
+      ? normalizePathPattern(path.join(parentDir, "*"))
+      : path.join(parentDir, "*").replaceAll("\\", "/");
 
   try {
     await runAsk(
       context.ask({
         permission: "external_directory",
-        patterns: [glob],
-        always: [glob],
+        patterns: [rawGlob],
+        always: [rawGlob],
         metadata: {
           filepath: absoluteTarget,
           parentDir,
@@ -151,6 +226,67 @@ export async function assertExternalDirectoryPermission(
       return error.message;
     }
     return "Permission denied (external directory).";
+  }
+}
+
+/**
+ * Trigger OpenCode's host-side `grep` permission check.
+ *
+ * Mirrors `opencode/src/tool/grep.ts` shape exactly so users with
+ * `"permission": { "grep": { "*": "ask" } }` (or "deny") see the same
+ * prompt regardless of whether they're using AFT's hoisted `grep` or
+ * OpenCode's built-in.
+ */
+export async function askGrepPermission(
+  context: ToolContext,
+  pattern: string,
+  metadata: { path?: string; include?: string } = {},
+): Promise<string | undefined> {
+  try {
+    await runAsk(
+      context.ask({
+        permission: "grep",
+        patterns: [pattern],
+        always: ["*"],
+        metadata: { pattern, ...metadata },
+      }),
+    );
+    return undefined;
+  } catch (error) {
+    if (error instanceof Error && error.message) {
+      return error.message;
+    }
+    return "Permission denied (grep).";
+  }
+}
+
+/**
+ * Trigger OpenCode's host-side `glob` permission check.
+ *
+ * Mirrors `opencode/src/tool/glob.ts` shape exactly so users with
+ * `"permission": { "glob": { "*": "ask" } }` see the same prompt
+ * regardless of which glob tool is used.
+ */
+export async function askGlobPermission(
+  context: ToolContext,
+  pattern: string,
+  metadata: { path?: string } = {},
+): Promise<string | undefined> {
+  try {
+    await runAsk(
+      context.ask({
+        permission: "glob",
+        patterns: [pattern],
+        always: ["*"],
+        metadata: { pattern, ...metadata },
+      }),
+    );
+    return undefined;
+  } catch (error) {
+    if (error instanceof Error && error.message) {
+      return error.message;
+    }
+    return "Permission denied (glob).";
   }
 }
 

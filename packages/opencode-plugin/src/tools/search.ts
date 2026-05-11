@@ -2,6 +2,12 @@ import type { ToolDefinition } from "@opencode-ai/plugin";
 import { z } from "zod";
 import type { PluginContext } from "../types.js";
 import { callBridge } from "./_shared.js";
+import {
+  askGlobPermission,
+  askGrepPermission,
+  assertExternalDirectoryPermission,
+  permissionDeniedResponse,
+} from "./permissions.js";
 
 type ToolArg = ToolDefinition["args"][string];
 
@@ -110,13 +116,37 @@ export function searchTools(ctx: PluginContext): Record<string, ToolDefinition> 
       path: arg(z.string().optional().describe("Directory to search in, relative to project root")),
     },
     execute: async (args, context): Promise<string> => {
+      const pattern = String(args.pattern);
+      const includeArg = args.include ? String(args.include) : undefined;
+      const pathArg = args.path ? String(args.path) : undefined;
+
+      // Match OpenCode native ordering: grep permission first (on the raw
+      // pattern + path the agent typed), then external_directory check on
+      // the resolved search target if it points outside the project.
+      const grepDenied = await askGrepPermission(context, pattern, {
+        path: pathArg,
+        include: includeArg,
+      });
+      if (grepDenied) return permissionDeniedResponse(grepDenied);
+
+      if (pathArg) {
+        const externalDenied = await assertExternalDirectoryPermission(context, pathArg, {
+          // grep accepts either a file or directory; native treats path as a
+          // file when the stat says so. We pass `file` here as the
+          // conservative default — `parentDir` becomes `dirname(path)` which
+          // is what users typically want to allow/deny in a rule.
+          kind: "file",
+        });
+        if (externalDenied) return permissionDeniedResponse(externalDenied);
+      }
+
       const response = await callBridge(ctx, context, "grep", {
-        pattern: args.pattern,
+        pattern,
         case_sensitive: true,
-        include: args.include
-          ? splitIncludeArg(String(args.include)).map(normalizeGlob).filter(Boolean)
+        include: includeArg
+          ? splitIncludeArg(includeArg).map(normalizeGlob).filter(Boolean)
           : undefined,
-        path: args.path,
+        path: pathArg,
         max_results: 100,
       });
 
@@ -153,6 +183,19 @@ export function searchTools(ctx: PluginContext): Record<string, ToolDefinition> 
             globPattern = `**/${globPattern.slice(lastSlash + 1)}`;
           }
         }
+      }
+
+      // Match OpenCode native ordering: glob permission first, then
+      // external_directory check on the resolved search root if it's
+      // outside the project.
+      const globDenied = await askGlobPermission(context, globPattern, { path: globPath });
+      if (globDenied) return permissionDeniedResponse(globDenied);
+
+      if (globPath) {
+        const externalDenied = await assertExternalDirectoryPermission(context, globPath, {
+          kind: "directory",
+        });
+        if (externalDenied) return permissionDeniedResponse(externalDenied);
       }
 
       const response = await callBridge(ctx, context, "glob", {

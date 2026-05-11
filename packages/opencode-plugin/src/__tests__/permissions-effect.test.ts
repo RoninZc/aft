@@ -15,7 +15,12 @@
 import { describe, expect, test } from "bun:test";
 import type { ToolContext } from "@opencode-ai/plugin";
 import { Effect } from "effect";
-import { askEditPermission, runAsk } from "../tools/permissions.js";
+import {
+  askEditPermission,
+  askGlobPermission,
+  askGrepPermission,
+  runAsk,
+} from "../tools/permissions.js";
 
 describe("runAsk + Effect (real runtime)", () => {
   test("Effect.succeed resolves cleanly through runAsk (allow path)", async () => {
@@ -73,6 +78,78 @@ describe("runAsk + Effect (real runtime)", () => {
     );
     await askEditPermission(ctx, ["src/foo.ts"]);
     expect(askWasInvoked).toBe(true);
+  });
+});
+
+describe("askGrepPermission / askGlobPermission (real Effect runtime)", () => {
+  test("askGrepPermission returns undefined on allow", async () => {
+    const ctx = makeMockContext(() => Effect.sync(() => {}));
+    const result = await askGrepPermission(ctx, "TODO");
+    expect(result).toBeUndefined();
+  });
+
+  test("askGrepPermission surfaces deny message", async () => {
+    const ctx = makeMockContext(
+      () => Effect.fail(new Error("Grep denied by policy")) as unknown as Effect.Effect<void>,
+    );
+    const result = await askGrepPermission(ctx, "TODO");
+    expect(result).toBe("Grep denied by policy");
+  });
+
+  test("askGrepPermission falls back to default message when Effect fails without one", async () => {
+    const ctx = makeMockContext(() => Effect.fail(new Error("")) as unknown as Effect.Effect<void>);
+    const result = await askGrepPermission(ctx, "TODO");
+    expect(result).toBe("Permission denied (grep).");
+  });
+
+  test("askGrepPermission forwards pattern + path + include in the ask payload", async () => {
+    let observed: { permission?: string; patterns?: string[]; metadata?: Record<string, unknown> } =
+      {};
+    const ctx = makeMockContext(
+      (args) =>
+        Effect.sync(() => {
+          observed = args as typeof observed;
+        }) as unknown as Effect.Effect<void>,
+    );
+    await askGrepPermission(ctx, "TODO\\b", { path: "src", include: "*.ts" });
+    expect(observed.permission).toBe("grep");
+    expect(observed.patterns).toEqual(["TODO\\b"]);
+    expect(observed.metadata).toEqual({ pattern: "TODO\\b", path: "src", include: "*.ts" });
+  });
+
+  test("askGlobPermission returns undefined on allow", async () => {
+    const ctx = makeMockContext(() => Effect.sync(() => {}));
+    const result = await askGlobPermission(ctx, "**/*.ts");
+    expect(result).toBeUndefined();
+  });
+
+  test("askGlobPermission surfaces deny message", async () => {
+    const ctx = makeMockContext(
+      () => Effect.fail(new Error("Glob denied by policy")) as unknown as Effect.Effect<void>,
+    );
+    const result = await askGlobPermission(ctx, "**/*.ts");
+    expect(result).toBe("Glob denied by policy");
+  });
+
+  test("askGlobPermission falls back to default message when Effect fails without one", async () => {
+    const ctx = makeMockContext(() => Effect.fail(new Error("")) as unknown as Effect.Effect<void>);
+    const result = await askGlobPermission(ctx, "**/*.ts");
+    expect(result).toBe("Permission denied (glob).");
+  });
+
+  test("askGlobPermission forwards pattern + path in the ask payload", async () => {
+    let observed: { permission?: string; patterns?: string[]; metadata?: Record<string, unknown> } =
+      {};
+    const ctx = makeMockContext(
+      (args) =>
+        Effect.sync(() => {
+          observed = args as typeof observed;
+        }) as unknown as Effect.Effect<void>,
+    );
+    await askGlobPermission(ctx, "**/*.test.ts", { path: "src" });
+    expect(observed.permission).toBe("glob");
+    expect(observed.patterns).toEqual(["**/*.test.ts"]);
+    expect(observed.metadata).toEqual({ pattern: "**/*.test.ts", path: "src" });
   });
 });
 
