@@ -400,14 +400,19 @@ export function createReadTool(ctx: PluginContext): ToolDefinition {
       }
 
       // Permission check
-      await runAsk(
-        context.ask({
-          permission: "read",
-          patterns: [filePath],
-          always: ["*"],
-          metadata: {},
-        }),
-      );
+      try {
+        await runAsk(
+          context.ask({
+            permission: "read",
+            patterns: [filePath],
+            always: ["*"],
+            metadata: {},
+          }),
+        );
+      } catch (error) {
+        if (error instanceof Error && error.message) return permissionDeniedResponse(error.message);
+        return permissionDeniedResponse("Permission denied.");
+      }
 
       // Image/PDF detection — return metadata for UI preview
       const ext = path.extname(filePath).toLowerCase();

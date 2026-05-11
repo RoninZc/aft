@@ -42,6 +42,21 @@ function extractHint(response: Record<string, unknown>): string | null {
   return typeof hint === "string" && hint.length > 0 ? hint : null;
 }
 
+async function checkAstPathsPermission(
+  context: Parameters<ToolDefinition["execute"]>[1],
+  paths: unknown,
+): Promise<string | undefined> {
+  if (!Array.isArray(paths)) return undefined;
+  const uniquePaths = Array.from(
+    new Set(paths.filter((p): p is string => typeof p === "string" && p.length > 0)),
+  );
+  for (const p of uniquePaths) {
+    const denial = await assertExternalDirectoryPermission(context, p, { kind: "directory" });
+    if (denial) return denial;
+  }
+  return undefined;
+}
+
 const SUPPORTED_LANGS = ["typescript", "tsx", "javascript", "python", "rust", "go"] as const;
 
 export function astTools(ctx: PluginContext): Record<string, ToolDefinition> {
@@ -66,6 +81,9 @@ export function astTools(ctx: PluginContext): Record<string, ToolDefinition> {
         .describe("Number of context lines to show around each match"),
     },
     execute: async (args, context): Promise<string> => {
+      const externalDenied = await checkAstPathsPermission(context, args.paths);
+      if (externalDenied) return permissionDeniedResponse(externalDenied);
+
       const params: Record<string, unknown> = {
         pattern: args.pattern,
         lang: args.lang,
@@ -169,10 +187,13 @@ export function astTools(ctx: PluginContext): Record<string, ToolDefinition> {
     execute: async (args, context): Promise<string> => {
       const isDryRun = args.dryRun === true;
 
+      const externalDenied = await checkAstPathsPermission(context, args.paths);
+      if (externalDenied) return permissionDeniedResponse(externalDenied);
+
       if (!isDryRun) {
         const paths = Array.isArray(args.paths) ? (args.paths as string[]) : ["."];
         // External-directory check first (mirrors opencode-native grep/glob directory checks).
-        {
+        if (!Array.isArray(args.paths)) {
           const asked = new Set<string>();
           for (const targetPath of paths) {
             const absPath = resolveAbsolutePath(context, targetPath);
@@ -202,9 +223,7 @@ export function astTools(ctx: PluginContext): Record<string, ToolDefinition> {
           metadata,
         );
         if (permissionError) {
-          const output = `Permission denied: ${permissionError}`;
-          showOutputToUser(context, output);
-          return output;
+          return permissionDeniedResponse(permissionError);
         }
       }
 

@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import type { PluginContext } from "../types.js";
@@ -77,7 +78,23 @@ export function safetyTools(ctx: PluginContext): Record<string, ToolDefinition> 
           if (permissionError) return permissionDeniedResponse(permissionError);
         }
 
+        if (op === "checkpoint" && Array.isArray(args.files)) {
+          const uniqueParents = new Set<string>();
+          for (const file of args.files as string[]) {
+            if (typeof file !== "string") continue;
+            const abs = path.isAbsolute(file) ? file : path.resolve(context.directory, file);
+            const parent = path.dirname(abs);
+            if (uniqueParents.has(parent)) continue;
+            uniqueParents.add(parent);
+            const denial = await assertExternalDirectoryPermission(context, file, { kind: "file" });
+            if (denial) return permissionDeniedResponse(denial);
+          }
+        }
+
         if (op === "restore") {
+          // Limitation: restore can include external files from a prior checkpoint,
+          // but the plugin has no per-file visibility into checkpoint contents
+          // without a Rust-side preview API. Keep the workspace edit ask below.
           const permissionError = await askEditPermission(context, [workspacePattern(context)], {
             checkpoint: args.name,
           });

@@ -83,7 +83,7 @@ export async function askEditPermission(
 function containsPath(parent: string, child: string): boolean {
   if (!parent) return false;
   const rel = path.relative(parent, child);
-  return rel === "" || !rel.startsWith("..");
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
 /**
@@ -144,12 +144,14 @@ function normalizePath(p: string): string {
  */
 function normalizePathPattern(p: string): string {
   if (process.platform !== "win32") return p;
-  if (p === "*") return p;
-  const match = p.match(/^(.*)[\\/]\*$/);
+  if (p === "*" || p === "**") return p;
+  const match = p.match(/^(.*)[\\/](\*{1,2})$/);
   if (!match) return normalizePath(p);
   const dir = /^[A-Za-z]:$/.test(match[1]) ? `${match[1]}\\` : match[1];
-  return path.join(normalizePath(dir), "*");
+  return path.join(normalizePath(dir), match[2]);
 }
+
+export const _permissionsInternalsForTest = { containsPath, normalizePathPattern };
 
 /**
  * Trigger OpenCode's host-side `external_directory` permission check when the

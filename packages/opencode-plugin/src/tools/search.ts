@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import { z } from "zod";
 import type { PluginContext } from "../types.js";
@@ -130,12 +132,15 @@ export function searchTools(ctx: PluginContext): Record<string, ToolDefinition> 
       if (grepDenied) return permissionDeniedResponse(grepDenied);
 
       if (pathArg) {
+        let kind: "file" | "directory" = "file";
+        try {
+          const abs = path.isAbsolute(pathArg) ? pathArg : path.resolve(context.directory, pathArg);
+          if (fs.lstatSync(abs).isDirectory()) kind = "directory";
+        } catch {
+          // Stat failed; conservative default "file" already set.
+        }
         const externalDenied = await assertExternalDirectoryPermission(context, pathArg, {
-          // grep accepts either a file or directory; native treats path as a
-          // file when the stat says so. We pass `file` here as the
-          // conservative default — `parentDir` becomes `dirname(path)` which
-          // is what users typically want to allow/deny in a rule.
-          kind: "file",
+          kind,
         });
         if (externalDenied) return permissionDeniedResponse(externalDenied);
       }
