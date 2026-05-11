@@ -1639,6 +1639,7 @@ mod tests {
                 dir.path().to_path_buf(),
                 10,
                 false,
+                false,
             )
             .unwrap();
         (registry, dir, task_id)

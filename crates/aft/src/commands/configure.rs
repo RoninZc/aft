@@ -1628,6 +1628,7 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    #[cfg(unix)]
     use std::path::PathBuf;
     use std::sync::{Arc, Barrier};
     use std::time::{Duration, Instant};
