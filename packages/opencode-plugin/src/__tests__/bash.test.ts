@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import type { BridgePool, BridgeRequestOptions } from "@cortexkit/aft-bridge";
 import { type ToolContext, tool } from "@opencode-ai/plugin";
 import { consumeToolMetadata } from "../metadata-store.js";
+import { _resetSubagentCacheForTest } from "../shared/subagent-detect.js";
 import { createBashKillTool, createBashStatusTool, createBashTool } from "../tools/bash.js";
 import type { PluginContext } from "../types.js";
 import { mockAsk, noopAsk } from "./test-helpers";
@@ -478,5 +479,209 @@ describe("bash_status tool", () => {
     await expect(killTool.execute({ taskId: "bash-done" }, createMockSdkContext())).rejects.toThrow(
       "task already finished",
     );
+  });
+});
+
+// =============================================================================
+// Subagent gating: AFT bash auto-promotes >5s tasks to background, which kills
+// subagents waiting for the completion reminder. The bash tool detects
+// subagent sessions (via client.session.get parentID) and:
+//   1. Silently converts `background: true` to `background: false` — the
+//      task_id the subagent would otherwise receive is unreachable because
+//      the subagent terminates after its single response, so we run the
+//      command inline instead. The subagent gets actual output, not a dead
+//      task_id.
+//   2. Extends the foreground poll window to the task's full hard-kill timeout
+//      so the bash call stays inline until terminal regardless of duration.
+// =============================================================================
+
+function createSubagentClient(parentID: string = "ses_parent_xyz"): any {
+  return {
+    lsp: { status: async () => ({ data: [] }) },
+    find: { symbols: async () => ({ data: [] }) },
+    session: {
+      // Real SDK shape: { path: { id }, query?: { directory } }.
+      get: async (input: { path: { id: string } }) => ({
+        data: { id: input.path.id, parentID },
+      }),
+    },
+  };
+}
+
+function createSubagentHarness(
+  sendImpl: (
+    command: string,
+    params: Record<string, unknown>,
+    options?: BridgeRequestOptions & { onProgress?: ProgressHandler },
+  ) => Promise<BridgeResponse> | BridgeResponse,
+  parentID?: string,
+) {
+  const calls: SendCall[] = [];
+  const bridge = {
+    send: async (
+      command: string,
+      params: Record<string, unknown> = {},
+      options?: BridgeRequestOptions & { onProgress?: ProgressHandler },
+    ) => {
+      calls.push({ command, params, options });
+      return await sendImpl(command, params, options);
+    },
+  };
+  const pool = { getBridge: () => bridge } as unknown as BridgePool;
+  const ctx: PluginContext = {
+    pool,
+    client: createSubagentClient(parentID),
+    plugin: undefined,
+    config: {} as PluginContext["config"],
+    storageDir: "/tmp/aft-test",
+  };
+  return { calls, tool: createBashTool(ctx) };
+}
+
+describe("OpenCode bash adapter — subagent gating", () => {
+  test("subagent + background: true is silently converted to foreground (bridge sees background=false)", async () => {
+    _resetSubagentCacheForTest();
+    // Simulate a task that completes on the 2nd bash_status poll.
+    let statusCalls = 0;
+    const { calls, tool: bash } = createSubagentHarness((command) => {
+      if (command === "bash") return { success: true, status: "running", task_id: "bash-conv" };
+      if (command === "bash_status") {
+        statusCalls += 1;
+        if (statusCalls < 2) return { success: true, status: "running" };
+        return {
+          success: true,
+          status: "completed",
+          exit_code: 0,
+          output_preview: "converted output",
+          output_truncated: false,
+        };
+      }
+      return { success: true };
+    });
+    const result = await bash.execute(
+      { command: "sleep 30", background: true, timeout: 30_000 },
+      createMockSdkContext({ sessionID: "ses_subagent_a" }),
+    );
+    // Result should be the actual command output, NOT a JSON refusal envelope
+    // and NOT a "Background task started" launch line.
+    expect(typeof result).toBe("string");
+    expect(result as string).toContain("converted output");
+    expect(result as string).not.toContain("Background task started");
+    expect(result as string).not.toContain('"success":false');
+    // The bridge MUST have been called with background=false (silent conversion).
+    const bashCall = calls.find((c) => c.command === "bash");
+    expect(bashCall).toBeDefined();
+    expect(bashCall?.params.background).toBe(false);
+    expect(bashCall?.params.notify_on_completion).toBe(false);
+    // Subagents must never call bash_promote even when caller requested
+    // background:true — the conversion happens upstream of promotion.
+    expect(calls.find((c) => c.command === "bash_promote")).toBeUndefined();
+  });
+
+  test("subagent + foreground polls until terminal without promoting to background", async () => {
+    _resetSubagentCacheForTest();
+    // Simulate a task that completes on the 3rd bash_status poll (~300ms in).
+    // Foreground primary sessions would promote at 5s; subagents must keep
+    // polling until terminal regardless of duration.
+    let statusCalls = 0;
+    const { calls, tool: bash } = createSubagentHarness((command) => {
+      if (command === "bash") return { success: true, status: "running", task_id: "bash-sub" };
+      if (command === "bash_status") {
+        statusCalls += 1;
+        if (statusCalls < 3) return { success: true, status: "running" };
+        return {
+          success: true,
+          status: "completed",
+          exit_code: 0,
+          output: "ok",
+          truncated: false,
+        };
+      }
+      return { success: true };
+    });
+    const result = await bash.execute(
+      { command: "fast-test", timeout: 30_000 },
+      createMockSdkContext({ sessionID: "ses_subagent_b" }),
+    );
+    expect(typeof result).toBe("string");
+    expect(result as string).not.toContain("promoted to background");
+    // bash_status should have been polled until terminal
+    expect(calls.filter((c) => c.command === "bash_status").length).toBeGreaterThanOrEqual(3);
+    // bash_promote should NEVER have been called for a subagent
+    expect(calls.find((c) => c.command === "bash_promote")).toBeUndefined();
+  });
+
+  test("subagent + foreground without explicit timeout uses 30-minute default poll window", async () => {
+    _resetSubagentCacheForTest();
+    // We can't actually wait 30 minutes, but we can verify the code path
+    // does NOT call bash_promote when the task is still running and no
+    // explicit timeout was passed. (Test runs a fast termination so the
+    // wait window is never hit.)
+    const { calls, tool: bash } = createSubagentHarness((command) => {
+      if (command === "bash") return { success: true, status: "running", task_id: "bash-sub2" };
+      if (command === "bash_status") {
+        return { success: true, status: "completed", exit_code: 0, output: "ok", truncated: false };
+      }
+      return { success: true };
+    });
+    await bash.execute(
+      { command: "fast-test" }, // no timeout — should use DEFAULT_HARD_TIMEOUT_MS
+      createMockSdkContext({ sessionID: "ses_subagent_c" }),
+    );
+    expect(calls.find((c) => c.command === "bash_promote")).toBeUndefined();
+  });
+
+  test("primary session + background: true still works (regression check)", async () => {
+    _resetSubagentCacheForTest();
+    // No client.session.get → resolveIsSubagent returns false → primary path.
+    const { calls, tool: bash } = createHarness((command) => {
+      if (command === "bash") return { success: true, status: "running", task_id: "bash-bg" };
+      return { success: true };
+    });
+    const result = await bash.execute(
+      { command: "sleep 30", background: true },
+      createMockSdkContext({ sessionID: "ses_primary_a" }),
+    );
+    expect(typeof result).toBe("string");
+    // Primary should NOT get the subagent error envelope
+    expect(result as string).not.toContain("not allowed for subagents");
+    // Primary background: true returns the launch line
+    expect(result as string).toContain("bash-bg");
+    expect(calls.find((c) => c.command === "bash")).toBeDefined();
+  });
+
+  test("SDK error on session.get defaults to primary (no regression)", async () => {
+    _resetSubagentCacheForTest();
+    const ctx: PluginContext = {
+      pool: {
+        getBridge: () => ({
+          send: async (command: string) => {
+            if (command === "bash")
+              return { success: true, status: "running", task_id: "bash-err" };
+            return { success: true };
+          },
+        }),
+      } as unknown as BridgePool,
+      client: {
+        lsp: { status: async () => ({ data: [] }) },
+        find: { symbols: async () => ({ data: [] }) },
+        session: {
+          get: async () => {
+            throw new Error("simulated SDK failure");
+          },
+        },
+      } as any,
+      plugin: undefined,
+      config: {} as PluginContext["config"],
+      storageDir: "/tmp/aft-test",
+    };
+    const bash = createBashTool(ctx);
+    const result = await bash.execute(
+      { command: "sleep 30", background: true },
+      createMockSdkContext({ sessionID: "ses_err_a" }),
+    );
+    // SDK failed → defaulted to primary → background: true succeeded
+    expect(result as string).not.toContain("not allowed for subagents");
+    expect(result as string).toContain("bash-err");
   });
 });
