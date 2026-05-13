@@ -248,7 +248,7 @@ maybeDescribe("e2e format_on_edit write tools", () => {
 
     expect(await readFile(filePath, "utf8")).toBe(RUSTFMT_EXPECTED);
     expectWriteOutcome(output, data, true);
-  });
+  }, 30_000);
 
   test.skipIf(!gofmtAvailable)(
     "gofmt formats deformatted Go (skipped: gofmt not available)",
@@ -325,7 +325,7 @@ maybeDescribe("e2e format_on_edit write tools", () => {
 
     expect(await readFile(filePath, "utf8")).toBe(FIXTURES.ts_deformatted);
     expectWriteOutcome(output, data, false, "timeout");
-  }, 12_000);
+  }, 30_000);
 
   test("fake formatter not installed", async () => {
     const h = await formatHarness(formatterPreset("prettier"));

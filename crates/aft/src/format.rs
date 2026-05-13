@@ -80,6 +80,53 @@ impl std::fmt::Display for FormatError {
     }
 }
 
+/// Apply Unix-specific isolation so a kill() on timeout terminates
+/// grandchildren too (e.g. `sh -c 'sleep 60'` orphaning `sleep`).
+///
+/// Without this, killing the immediate child (`sh`) leaves `sleep`
+/// holding stdout/stderr pipes open, and the reader threads block
+/// until `sleep` terminates — turning a 2s timeout into a 60s hang.
+#[cfg(unix)]
+fn isolate_in_process_group(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: setsid is async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn isolate_in_process_group(_cmd: &mut Command) {
+    // Best-effort no-op on Windows; child.kill() does not propagate
+    // to grandchildren but reader threads will still close pipes
+    // when the immediate child exits.
+}
+
+/// Kill the child and (on Unix) its entire process group, so orphaned
+/// grandchildren don't keep pipes open after a timeout.
+#[cfg(unix)]
+fn kill_process_tree(child: &mut Child) {
+    let pid = child.id() as i32;
+    if pid > 0 {
+        // SAFETY: killpg with SIGKILL on a process group leader is safe.
+        // Negative pid form (kill -pgid) targets the whole group.
+        unsafe {
+            libc::killpg(pid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+}
+
+#[cfg(not(unix))]
+fn kill_process_tree(child: &mut Child) {
+    let _ = child.kill();
+}
+
 /// Spawn a subprocess and wait for completion with timeout protection.
 ///
 /// Polls `try_wait()` at 50ms intervals. On timeout, kills the child process
@@ -97,6 +144,8 @@ pub fn run_external_tool(
     if let Some(dir) = working_dir {
         cmd.current_dir(dir);
     }
+
+    isolate_in_process_group(&mut cmd);
 
     let child = match cmd.spawn() {
         Ok(c) => c,
@@ -161,10 +210,12 @@ fn wait_with_timeout(
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
+                    kill_process_tree(&mut child);
                     let _ = child.wait();
-                    let _ = stdout_thread.join().unwrap_or_default();
-                    let _ = stderr_thread.join().unwrap_or_default();
+                    // Do NOT block joining the reader threads — orphaned
+                    // grandchildren may still hold the pipes open even after
+                    // the immediate child is gone. The threads will detach
+                    // and clean up when pipes finally close.
                     return Err(FormatError::Timeout {
                         tool: command.to_string(),
                         timeout_secs,
@@ -173,17 +224,12 @@ fn wait_with_timeout(
                 thread::sleep(Duration::from_millis(50));
             }
             Err(e) => {
-                let _ = child.kill();
+                kill_process_tree(&mut child);
                 let _ = child.wait();
-                let _ = stdout_thread.join().unwrap_or_default();
-                let stderr = stderr_thread.join().unwrap_or_default();
+                // Same rationale as the timeout branch: don't block on join.
                 return Err(FormatError::Failed {
                     tool: command.to_string(),
-                    stderr: if stderr.is_empty() {
-                        format!("try_wait error: {}", e)
-                    } else {
-                        format!("try_wait error: {}; stderr: {}", e, stderr)
-                    },
+                    stderr: format!("try_wait error: {}", e),
                 });
             }
         }
@@ -1161,6 +1207,8 @@ pub fn run_external_tool_capture(
     if let Some(dir) = working_dir {
         cmd.current_dir(dir);
     }
+
+    isolate_in_process_group(&mut cmd);
 
     let child = match cmd.spawn() {
         Ok(c) => c,
