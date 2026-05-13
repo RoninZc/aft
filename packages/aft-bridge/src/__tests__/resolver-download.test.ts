@@ -53,11 +53,19 @@ describe("findBinary async download", () => {
 
   test("honors expectedVersion when falling through to ensureBinary", async () => {
     const seenVersions: Array<string | undefined> = [];
+    // Provide ALL exports from the real downloader.ts module surface. If we
+    // only stub a subset, Bun's process-global mock cache can leak into later
+    // test files that re-export through index.ts: those files end up seeing
+    // a downloader module missing exports like `getBinaryName`, which
+    // surfaces as `SyntaxError: export 'getBinaryName' not found in
+    // './downloader.js'` between tests under CI.
     mock.module("../downloader.js", () => ({
       ensureBinary: async (version?: string) => {
         seenVersions.push(version);
         return "/downloaded/aft";
       },
+      downloadBinary: async () => "/downloaded/aft",
+      getBinaryName: () => (process.platform === "win32" ? "aft.exe" : "aft"),
       getCacheDir: () => cacheDir,
       getCachedBinaryPath: () => null,
     }));
