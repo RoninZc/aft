@@ -207,10 +207,10 @@ where
         match try_one(shell) {
             Ok(child) => {
                 if idx > 0 {
-                    log::warn!(
-                        "[aft] bash spawn fell back to {} after {} earlier candidate(s) failed; \
-                         the cached PATH probe disagreed with runtime spawn — likely PATH \
-                         inheritance, antivirus / AppLocker / Defender ASR, or sandbox policy.",
+                    crate::slog_warn!(
+                        "bash spawn fell back to {} after {} earlier candidate(s) failed; \
+                     the cached PATH probe disagreed with runtime spawn — likely PATH \
+                     inheritance, antivirus / AppLocker / Defender ASR, or sandbox policy.",
                         shell.binary(),
                         idx
                     );
@@ -218,8 +218,8 @@ where
                 return Ok(child);
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                log::warn!(
-                    "[aft] bash spawn: {} returned NotFound at runtime — trying next candidate",
+                crate::slog_warn!(
+                    "bash spawn: {} returned NotFound at runtime — trying next candidate",
                     shell.binary()
                 );
                 last_error = Some(format!("{}: {e}", shell.binary()));

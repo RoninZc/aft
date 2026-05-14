@@ -720,7 +720,7 @@ impl FileParser {
                 let grammar = grammar_for(lang);
                 let mut parser = Parser::new();
                 parser.set_language(&grammar).map_err(|e| {
-                    log::error!("grammar init failed for {:?}: {}", lang, e);
+                    crate::slog_error!("grammar init failed for {:?}: {}", lang, e);
                     AftError::ParseError {
                         message: format!("grammar init failed for {:?}: {}", lang, e),
                     }
@@ -774,7 +774,7 @@ impl FileParser {
             })?;
 
             let tree = self.parser_for(lang)?.parse(&source, None).ok_or_else(|| {
-                log::error!("parse failed for {}", path.display());
+                crate::slog_error!("parse failed for {}", path.display());
                 AftError::ParseError {
                     message: format!("tree-sitter parse returned None for {}", path.display()),
                 }

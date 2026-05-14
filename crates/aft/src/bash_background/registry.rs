@@ -241,7 +241,7 @@ impl BgTaskRegistry {
         let child = match spawn_detached_child(command, &paths, &workdir, &env) {
             Ok(child) => child,
             Err(error) => {
-                log::warn!("failed to spawn background bash task {task_id}; deleting partial bundle: {error}");
+                crate::slog_warn!("failed to spawn background bash task {task_id}; deleting partial bundle: {error}");
                 let _ = delete_task_bundle(&paths);
                 return Err(error);
             }
@@ -333,7 +333,7 @@ impl BgTaskRegistry {
         let child = match spawn_detached_child(command, &paths, &workdir, &env) {
             Ok(child) => child,
             Err(error) => {
-                log::warn!("failed to spawn background bash task {task_id}; deleting partial bundle: {error}");
+                crate::slog_warn!("failed to spawn background bash task {task_id}; deleting partial bundle: {error}");
                 let _ = delete_task_bundle(&paths);
                 return Err(error);
             }
@@ -374,7 +374,7 @@ impl BgTaskRegistry {
         self.start_watchdog();
         if !self.inner.persisted_gc_started.swap(true, Ordering::SeqCst) {
             if let Err(error) = self.maybe_gc_persisted(storage_dir) {
-                log::warn!("failed to GC persisted background bash tasks: {error}");
+                crate::slog_warn!("failed to GC persisted background bash tasks: {error}");
             }
         }
         let dir = session_tasks_dir(storage_dir, session_id);
@@ -424,10 +424,8 @@ impl BgTaskRegistry {
                             "recovered from inconsistent killing state on replay".to_string()
                         });
                         if reason.is_some() {
-                            log::warn!(
-                                "background task {} had killing state with exit marker; preferring marker",
-                                metadata.task_id
-                            );
+                            crate::slog_warn!("background task {} had killing state with exit marker; preferring marker",
+                            metadata.task_id);
                         }
                         metadata = terminal_metadata_from_marker(metadata, marker, reason);
                         let _ = write_task(&paths.json, &metadata);
@@ -588,7 +586,7 @@ impl BgTaskRegistry {
                 let task_entries = match fs::read_dir(&session_dir) {
                     Ok(entries) => entries,
                     Err(error) => {
-                        log::warn!(
+                        crate::slog_warn!(
                             "failed to read background task session dir {}: {error}",
                             session_dir.display()
                         );
@@ -610,7 +608,7 @@ impl BgTaskRegistry {
                     let metadata = match read_task(&json_path) {
                         Ok(metadata) => metadata,
                         Err(error) => {
-                            log::warn!(
+                            crate::slog_warn!(
                                 "quarantining corrupt background task metadata {}: {error}",
                                 json_path.display()
                             );
@@ -631,7 +629,7 @@ impl BgTaskRegistry {
                             );
                         }
                         Err(error) => {
-                            log::warn!(
+                            crate::slog_warn!(
                                 "failed to delete background task bundle {}: {error}",
                                 metadata.task_id
                             );
@@ -758,7 +756,7 @@ impl BgTaskRegistry {
         for (task_id, paths) in removable_paths {
             match delete_task_bundle(&paths) {
                 Ok(()) => log::debug!("deleted persisted background task bundle {task_id}"),
-                Err(error) => log::warn!(
+                Err(error) => crate::slog_warn!(
                     "failed to delete persisted background task bundle {task_id}: {error}"
                 ),
             }
@@ -1322,7 +1320,7 @@ fn gc_quarantine(storage_dir: &Path) {
         let entries = match fs::read_dir(&session_quarantine_dir) {
             Ok(entries) => entries,
             Err(error) => {
-                log::warn!(
+                crate::slog_warn!(
                     "failed to read background task quarantine dir {}: {error}",
                     session_quarantine_dir.display()
                 );
@@ -1344,7 +1342,7 @@ fn gc_quarantine(storage_dir: &Path) {
                     "deleted old background task quarantine entry {}",
                     path.display()
                 ),
-                Err(error) => log::warn!(
+                Err(error) => crate::slog_warn!(
                     "failed to delete old background task quarantine entry {}: {error}",
                     path.display()
                 ),
@@ -1398,7 +1396,7 @@ fn quarantine_corrupt_task_json(
             continue;
         }
         let Some(sibling_name) = sibling.file_name().and_then(|name| name.to_str()) else {
-            log::warn!(
+            crate::slog_warn!(
                 "skipping background task sibling with invalid name during quarantine: {}",
                 sibling.display()
             );
@@ -1406,7 +1404,7 @@ fn quarantine_corrupt_task_json(
         };
         let sibling_target = quarantine_dir.join(format!("{sibling_name}.corrupt-{unix_ts}"));
         if let Err(error) = fs::rename(&sibling, &sibling_target) {
-            log::warn!(
+            crate::slog_warn!(
                 "failed to quarantine background task sibling {} to {}: {error}",
                 sibling.display(),
                 sibling_target.display()
@@ -1747,29 +1745,25 @@ fn spawn_detached_child(
                 match cmd.spawn() {
                     Ok(child) => {
                         if idx > 0 {
-                            log::warn!(
-                                "[aft] background bash spawn fell back to {} after {} earlier candidate(s) failed; \
-                                 the cached PATH probe disagreed with runtime spawn — likely PATH \
-                                 inheritance, antivirus / AppLocker / Defender ASR, or sandbox policy.",
-                                shell.binary(),
-                                idx
-                            );
+                            crate::slog_warn!("background bash spawn fell back to {} after {} earlier candidate(s) failed; \
+                             the cached PATH probe disagreed with runtime spawn — likely PATH \
+                             inheritance, antivirus / AppLocker / Defender ASR, or sandbox policy.",
+                            shell.binary(),
+                            idx);
                         }
                         if flags == without_breakaway {
-                            log::warn!(
-                                "[aft] background bash spawn: CREATE_BREAKAWAY_FROM_JOB rejected \
-                                 (likely a restrictive Job Object — CI sandbox or MDM policy). \
-                                 Spawned without breakaway; the bg task will be torn down if the \
-                                 AFT process group is killed."
+                            crate::slog_warn!(
+                                "background bash spawn: CREATE_BREAKAWAY_FROM_JOB rejected \
+                             (likely a restrictive Job Object — CI sandbox or MDM policy). \
+                             Spawned without breakaway; the bg task will be torn down if the \
+                             AFT process group is killed."
                             );
                         }
                         return Ok(child);
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        log::warn!(
-                            "[aft] background bash spawn: {} returned NotFound at runtime — trying next candidate",
-                            shell.binary()
-                        );
+                        crate::slog_warn!("background bash spawn: {} returned NotFound at runtime — trying next candidate",
+                        shell.binary());
                         last_error = Some(format!("{}: {e}", shell.binary()));
                         // Skip the without-breakaway retry for NotFound — the
                         // binary itself is missing, breakaway flag is irrelevant.
@@ -1777,9 +1771,9 @@ fn spawn_detached_child(
                     }
                     Err(e) if flags == with_breakaway && e.raw_os_error() == Some(5) => {
                         // Access Denied during breakaway — retry without it.
-                        log::warn!(
-                            "[aft] background bash spawn: CREATE_BREAKAWAY_FROM_JOB rejected with \
-                             Access Denied — retrying {} without breakaway",
+                        crate::slog_warn!(
+                            "background bash spawn: CREATE_BREAKAWAY_FROM_JOB rejected with \
+                         Access Denied — retrying {} without breakaway",
                             shell.binary()
                         );
                         last_error = Some(format!("{}: {e}", shell.binary()));

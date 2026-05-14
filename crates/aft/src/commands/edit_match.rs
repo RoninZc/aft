@@ -639,11 +639,9 @@ fn restore_glob_checkpoint(
     {
         Ok(_) => Ok(()),
         Err(e) => {
-            log::warn!(
-                "edit_match glob rollback: failed to restore checkpoint {}: {}",
-                name,
-                e
-            );
+            crate::slog_warn!("edit_match glob rollback: failed to restore checkpoint {}: {}",
+            name,
+            e);
             Err(e.to_string())
         }
     }

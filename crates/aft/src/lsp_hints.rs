@@ -44,7 +44,7 @@ pub fn parse_lsp_hints(req: &RawRequest) -> Option<LspHints> {
             Some(hints)
         }
         Err(e) => {
-            log::warn!("lsp_hints: ignoring malformed data: {}", e);
+            crate::slog_warn!("lsp_hints: ignoring malformed data: {}", e);
             None
         }
     }

@@ -29,7 +29,7 @@ fn main() {
         })
         .init();
 
-    log::info!("started, pid {}", std::process::id());
+    aft::slog_info!("started, pid {}", std::process::id());
 
     let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), Config::default());
     install_signal_handler(ctx.bash_background().clone(), ctx.lsp_child_registry());
@@ -60,11 +60,11 @@ fn main() {
     ctx.set_progress_sender(Some(std::sync::Arc::new(Box::new(
         move |frame: PushFrame| {
             let Ok(mut writer) = stdout_writer.lock() else {
-                log::error!("stdout push frame lock poisoned");
+                aft::slog_error!("stdout push frame lock poisoned");
                 return;
             };
             if let Err(e) = write_push_frame(&mut *writer, &frame) {
-                log::error!("stdout push frame write error: {}", e);
+                aft::slog_error!("stdout push frame write error: {}", e);
             }
         },
     ))));
@@ -75,7 +75,7 @@ fn main() {
         let line = match line_result {
             Ok(l) => l,
             Err(e) => {
-                log::error!("stdin read error: {}", e);
+                aft::slog_error!("stdin read error: {}", e);
                 break;
             }
         };
@@ -108,7 +108,7 @@ fn main() {
                 response
             }
             Err(e) => {
-                log::error!("parse error: {} — input: {}", e, trimmed);
+                aft::slog_error!("parse error: {} — input: {}", e, trimmed);
                 Response::error(
                     "_parse_error",
                     "parse_error",
@@ -118,14 +118,14 @@ fn main() {
         };
 
         if let Err(e) = write_response(&ctx, &response) {
-            log::error!("stdout write error: {}", e);
+            aft::slog_error!("stdout write error: {}", e);
             break;
         }
     }
 
     ctx.lsp().shutdown_all();
     ctx.bash_background().detach();
-    log::info!("stdin closed, shutting down");
+    aft::slog_info!("stdin closed, shutting down");
 }
 
 #[cfg(unix)]
@@ -139,7 +139,7 @@ fn install_signal_handler(
     ]);
     let Ok(mut signals) = signals else {
         if let Err(error) = signals {
-            log::error!("failed to install signal handlers: {error}");
+            aft::slog_error!("failed to install signal handlers: {error}");
         }
         return;
     };
@@ -159,7 +159,7 @@ fn install_signal_handler(
             // which is too slow for a signal handler — we SIGKILL instead.
             let killed = lsp_children.kill_all();
             if killed > 0 {
-                log::info!("signal {}: killed {} LSP child process(es)", signal, killed);
+                aft::slog_info!("signal {}: killed {} LSP child process(es)", signal, killed);
             }
             std::process::exit(128 + signal);
         }
@@ -288,7 +288,7 @@ fn dispatch(req: RawRequest, ctx: &AppContext) -> Response {
         // that integration tests execute. See: crates/aft/tests/integration/safety_test.rs
         "snapshot" => handle_snapshot(&req, ctx),
         _ => {
-            log::warn!("unknown command: {}", req.command);
+            aft::slog_warn!("unknown command: {}", req.command);
             Response::error(
                 &req.id,
                 "unknown_command",
@@ -539,7 +539,7 @@ fn drain_watcher_events(ctx: &AppContext) {
         }
     }
 
-    log::info!("invalidated {} files", changed.len());
+    aft::slog_info!("invalidated {} files", changed.len());
 }
 
 fn drain_search_index_events(ctx: &AppContext) {
@@ -651,7 +651,7 @@ fn drain_lsp_events(ctx: &AppContext) {
                 );
             }
             LspEvent::ServerExited { server_kind, root } => {
-                log::info!("exited {:?} {}", server_kind, root.display());
+                aft::slog_info!("exited {:?} {}", server_kind, root.display());
             }
         }
     }

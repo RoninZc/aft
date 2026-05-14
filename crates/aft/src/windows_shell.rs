@@ -290,8 +290,8 @@ where
     //    to cmd when the user already gets cmd as the floor candidate.
     if let Some(shell_path) = shell_env() {
         if let Some(resolved) = resolve_user_shell(&shell_path, &which_for) {
-            log::info!(
-                "[aft] bash candidate: $SHELL = {} (POSIX, invoked as -c)",
+            crate::slog_info!(
+                "bash candidate: $SHELL = {} (POSIX, invoked as -c)",
                 resolved.display()
             );
             candidates.push(WindowsShell::Posix(resolved));
@@ -300,13 +300,13 @@ where
 
     // 2-3. PowerShell variants.
     if which_for("pwsh.exe").is_some() {
-        log::info!("[aft] bash candidate: pwsh.exe (PowerShell 7+; supports && pipeline operator)");
+        crate::slog_info!(
+            "bash candidate: pwsh.exe (PowerShell 7+; supports && pipeline operator)"
+        );
         candidates.push(WindowsShell::Pwsh);
     }
     if which_for("powershell.exe").is_some() {
-        log::info!(
-            "[aft] bash candidate: powershell.exe (Windows PowerShell 5.1; && in pipelines unsupported, will surface as parse error)"
-        );
+        crate::slog_info!("bash candidate: powershell.exe (Windows PowerShell 5.1; && in pipelines unsupported, will surface as parse error)");
         candidates.push(WindowsShell::Powershell);
     }
 
@@ -319,8 +319,8 @@ where
         .any(|c| matches!(c, WindowsShell::Posix(_)));
     if !already_posix {
         if let Some(git_bash) = locate_git_bash(&which_for) {
-            log::info!(
-                "[aft] bash candidate: git-bash auto-detected at {} (POSIX, invoked as -c)",
+            crate::slog_info!(
+                "bash candidate: git-bash auto-detected at {} (POSIX, invoked as -c)",
                 git_bash.display()
             );
             candidates.push(WindowsShell::Posix(git_bash));
@@ -336,15 +336,15 @@ where
 
     let only_cmd = candidates.len() == 1;
     if only_cmd {
-        log::warn!(
-            "[aft] No bash, PowerShell, or git-bash is reachable from this \
-             aft process — using cmd.exe only. This can occur even when \
-             PowerShell is installed if PATH inheritance is restricted, \
-             antivirus / AppLocker / Defender ASR rules block PowerShell as a \
-             child process, or you're on a stripped Windows SKU. Bash-style \
-             commands using && and || still work; PowerShell-only cmdlets and \
-             POSIX-only commands will not. Details: \
-             https://github.com/cortexkit/aft/issues/27"
+        crate::slog_warn!(
+            "No bash, PowerShell, or git-bash is reachable from this \
+         aft process — using cmd.exe only. This can occur even when \
+         PowerShell is installed if PATH inheritance is restricted, \
+         antivirus / AppLocker / Defender ASR rules block PowerShell as a \
+         child process, or you're on a stripped Windows SKU. Bash-style \
+         commands using && and || still work; PowerShell-only cmdlets and \
+         POSIX-only commands will not. Details: \
+         https://github.com/cortexkit/aft/issues/27"
         );
     }
     candidates
@@ -380,9 +380,9 @@ where
     };
 
     if !is_posix_shell_name(&candidate) {
-        log::info!(
-            "[aft] $SHELL points at {} which isn't a recognized POSIX shell; \
-             falling back to PowerShell/cmd resolution.",
+        crate::slog_info!(
+            "$SHELL points at {} which isn't a recognized POSIX shell; \
+         falling back to PowerShell/cmd resolution.",
             candidate.display()
         );
         return None;

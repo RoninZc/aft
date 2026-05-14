@@ -81,12 +81,10 @@ impl CheckpointStore {
                     file_contents.insert(path.clone(), content);
                 }
                 Err(e) => {
-                    log::warn!(
-                        "checkpoint {}: skipping unreadable file {}: {}",
-                        name,
-                        path.display(),
-                        e
-                    );
+                    crate::slog_warn!("checkpoint {}: skipping unreadable file {}: {}",
+                    name,
+                    path.display(),
+                    e);
                     skipped.push((path.clone(), e.to_string()));
                 }
             }
@@ -119,14 +117,12 @@ impl CheckpointStore {
             .insert(name.to_string(), checkpoint);
 
         if skipped.is_empty() {
-            log::info!("checkpoint created: {} ({} files)", name, file_count);
+            crate::slog_info!("checkpoint created: {} ({} files)", name, file_count);
         } else {
-            log::info!(
-                "checkpoint created: {} ({} files, {} skipped)",
-                name,
-                file_count,
-                skipped.len()
-            );
+            crate::slog_info!("checkpoint created: {} ({} files, {} skipped)",
+            name,
+            file_count,
+            skipped.len());
         }
 
         Ok(CheckpointInfo {
@@ -145,7 +141,7 @@ impl CheckpointStore {
 
         restore_paths_atomically(checkpoint, &paths)?;
 
-        log::info!("checkpoint restored: {}", name);
+        crate::slog_info!("checkpoint restored: {}", name);
 
         Ok(CheckpointInfo {
             name: checkpoint.name.clone(),
@@ -174,7 +170,7 @@ impl CheckpointStore {
         }
         restore_paths_atomically(checkpoint, validated_paths)?;
 
-        log::info!("checkpoint restored: {}", name);
+        crate::slog_info!("checkpoint restored: {}", name);
 
         Ok(CheckpointInfo {
             name: checkpoint.name.clone(),

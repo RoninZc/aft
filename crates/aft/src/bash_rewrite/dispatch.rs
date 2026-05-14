@@ -25,7 +25,7 @@ pub fn dispatch(command: &str, session_id: Option<&str>, ctx: &AppContext) -> Op
             match rule.rewrite(command, session_id, ctx) {
                 Ok(response) => return Some(response),
                 Err(message) => {
-                    log::warn!("bash rewrite rule {} declined: {}", rule.name(), message);
+                    crate::slog_warn!("bash rewrite rule {} declined: {}", rule.name(), message);
                     return None;
                 }
             }

@@ -52,7 +52,7 @@ pub fn handle_lsp_inspect(req: &RawRequest, ctx: &AppContext) -> Response {
             match lsp.pull_file_diagnostics(&canonical, &config) {
                 Ok(results) => results,
                 Err(err) => {
-                    log::warn!("[lsp_inspect] pull_file_diagnostics failed: {err}");
+                    crate::slog_warn!("[lsp_inspect] pull_file_diagnostics failed: {err}");
                     Vec::new()
                 }
             }

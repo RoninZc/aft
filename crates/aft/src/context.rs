@@ -353,11 +353,9 @@ impl AppContext {
         let root_ignore = Path::new(&root).join(".gitignore");
         if root_ignore.exists() {
             if let Some(err) = builder.add(&root_ignore) {
-                log::warn!(
-                    "gitignore parse error in {}: {}",
-                    root_ignore.display(),
-                    err
-                );
+                crate::slog_warn!("gitignore parse error in {}: {}",
+                root_ignore.display(),
+                err);
             }
         }
         // .git/info/exclude — manually added because GitignoreBuilder::new()
@@ -365,11 +363,9 @@ impl AppContext {
         let info_exclude = Path::new(&root).join(".git").join("info").join("exclude");
         if info_exclude.exists() {
             if let Some(err) = builder.add(&info_exclude) {
-                log::warn!(
-                    "gitignore parse error in {}: {}",
-                    info_exclude.display(),
-                    err
-                );
+                crate::slog_warn!("gitignore parse error in {}: {}",
+                info_exclude.display(),
+                err);
             }
         }
         // Walk the project to pick up nested .gitignore files. Cap the walk
@@ -394,11 +390,9 @@ impl AppContext {
         for entry in walker.flatten() {
             if entry.file_name() == ".gitignore" && entry.path() != root_ignore {
                 if let Some(err) = builder.add(entry.path()) {
-                    log::warn!(
-                        "nested gitignore parse error in {}: {}",
-                        entry.path().display(),
-                        err
-                    );
+                    crate::slog_warn!("nested gitignore parse error in {}: {}",
+                    entry.path().display(),
+                    err);
                 }
             }
         }
@@ -406,14 +400,14 @@ impl AppContext {
             Ok(gi) => {
                 let count = gi.num_ignores();
                 if count > 0 {
-                    log::info!("gitignore matcher built: {} pattern(s)", count);
+                    crate::slog_info!("gitignore matcher built: {} pattern(s)", count);
                     *self.gitignore.borrow_mut() = Some(Arc::new(gi));
                 } else {
                     *self.gitignore.borrow_mut() = None;
                 }
             }
             Err(err) => {
-                log::warn!("gitignore matcher build failed: {}", err);
+                crate::slog_warn!("gitignore matcher build failed: {}", err);
                 *self.gitignore.borrow_mut() = None;
             }
         }
@@ -632,7 +626,7 @@ impl AppContext {
         if let Ok(mut lsp) = self.lsp_manager.try_borrow_mut() {
             let config = self.config();
             if let Err(e) = lsp.notify_file_changed(file_path, content, &config) {
-                log::warn!("sync error for {}: {}", file_path.display(), e);
+                crate::slog_warn!("sync error for {}: {}", file_path.display(), e);
             }
         }
     }
@@ -672,7 +666,7 @@ impl AppContext {
         {
             Ok(v) => v,
             Err(e) => {
-                log::warn!("sync error for {}: {}", file_path.display(), e);
+                crate::slog_warn!("sync error for {}: {}", file_path.display(), e);
                 return crate::lsp::manager::PostEditWaitOutcome::default();
             }
         };
@@ -801,7 +795,7 @@ impl AppContext {
         if let Ok(mut lsp) = self.lsp_manager.try_borrow_mut() {
             let config = self.config();
             if let Err(e) = lsp.notify_files_watched_changed(config_paths, &config) {
-                log::warn!("watched-file sync error: {}", e);
+                crate::slog_warn!("watched-file sync error: {}", e);
             }
         }
     }

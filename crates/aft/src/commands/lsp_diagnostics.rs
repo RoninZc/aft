@@ -169,7 +169,7 @@ fn handle_file_mode(
         match lsp.pull_file_diagnostics(&canonical, &ctx.config()) {
             Ok(results) => results,
             Err(err) => {
-                log::warn!("[lsp_diagnostics] pull_file_diagnostics failed: {err}");
+                crate::slog_warn!("[lsp_diagnostics] pull_file_diagnostics failed: {err}");
                 Vec::new()
             }
         }
@@ -320,7 +320,7 @@ fn handle_directory_mode(
                 });
             }
             Err(err) => {
-                log::warn!("[lsp_diagnostics] workspace pull failed for {key:?}: {err}");
+                crate::slog_warn!("[lsp_diagnostics] workspace pull failed for {key:?}: {err}");
                 all_complete = false;
                 server_status.push(ServerStatusEntry {
                     server_id: key.kind.id_str().to_string(),
