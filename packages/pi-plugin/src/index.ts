@@ -50,6 +50,7 @@ import {
 } from "./bg-notifications.js";
 import { registerStatusCommand } from "./commands/aft-status.js";
 import {
+  type AftConfig,
   loadAftConfig,
   resolveExperimentalConfigForConfigure,
   resolveLspConfigForConfigure,
@@ -147,6 +148,13 @@ function drainPendingEagerWarnings(projectRoot: string): ConfigureWarning[] {
   const pending = pendingEagerWarnings.get(projectRoot) ?? [];
   pendingEagerWarnings.delete(projectRoot);
   return pending;
+}
+
+function shouldPrepareOnnxRuntime(
+  config: Pick<AftConfig, "semantic_search" | "semantic">,
+): boolean {
+  const isFastembedSemanticBackend = (config.semantic?.backend ?? "fastembed") === "fastembed";
+  return config.semantic_search === true && isFastembedSemanticBackend;
 }
 
 // IMPORTANT: NOT exported as a named export — only via the __test__
@@ -337,7 +345,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   // settles. Bridges spawned AFTER the download finishes pick it up
   // automatically. `ensureOnnxRuntime` returns null on unsupported platforms.
   let onnxRuntimePromise: Promise<string | null> | null = null;
-  if (config.semantic_search) {
+  if (shouldPrepareOnnxRuntime(config)) {
     onnxRuntimePromise = ensureOnnxRuntime(storageDir).catch((err) => {
       warn(`Failed to prepare ONNX Runtime: ${err instanceof Error ? err.message : String(err)}`);
       return null;
@@ -693,4 +701,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   log(`AFT extension ready (surface=${config.tool_surface ?? "recommended"})`);
 }
 
-export const __test__ = { resolveToolSurface, handleConfigureWarningsForSession };
+export const __test__ = {
+  resolveToolSurface,
+  handleConfigureWarningsForSession,
+  shouldPrepareOnnxRuntime,
+};

@@ -48,4 +48,27 @@ describe("Pi Lane G plugin orchestration regressions", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  test("ONNX runtime is only prepared for fastembed semantic search", () => {
+    expect(__test__.shouldPrepareOnnxRuntime({ semantic_search: true })).toBe(true);
+    expect(
+      __test__.shouldPrepareOnnxRuntime({
+        semantic_search: true,
+        semantic: { backend: "fastembed" },
+      }),
+    ).toBe(true);
+    expect(
+      __test__.shouldPrepareOnnxRuntime({
+        semantic_search: true,
+        semantic: { backend: "openai_compatible" },
+      }),
+    ).toBe(false);
+    expect(
+      __test__.shouldPrepareOnnxRuntime({
+        semantic_search: true,
+        semantic: { backend: "ollama" },
+      }),
+    ).toBe(false);
+    expect(__test__.shouldPrepareOnnxRuntime({ semantic_search: false })).toBe(false);
+  });
 });
