@@ -139,10 +139,9 @@ export function createBashTool(ctx: PluginContext): ToolDefinition {
       const isSubagent = await resolveIsSubagent(ctx.client, context.sessionID, context.directory);
       const requestedBackground = args.background === true;
       const effectiveBackground = isSubagent ? false : requestedBackground;
-      sessionLog(
-        context.sessionID,
-        `[bash] subagent gate: isSubagent=${isSubagent}, requestedBackground=${requestedBackground}, effectiveBackground=${effectiveBackground}, hasTimeout=${typeof args.timeout === "number"}`,
-      );
+      // Only log when the gate actually changes behavior (subagent path).
+      // The common primary-session foreground case is the overwhelming
+      // majority of calls and produces no useful log signal.
       if (isSubagent && requestedBackground) {
         sessionLog(
           context.sessionID,

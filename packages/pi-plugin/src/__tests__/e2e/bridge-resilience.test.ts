@@ -54,10 +54,18 @@ maybeDescribe("e2e bridge transport resilience (Pi)", () => {
     await h.bridge.send("ping");
     const firstPid = childPid(h.bridge);
 
+    // transportTimeoutMs must be SHORTER than the bash command duration
+    // (sleep 1 = 1000ms) so the test actually verifies "bash dispatch
+    // returns before the transport timeout fires, even though the command
+    // itself is still running". 100ms was too tight under CI load:
+    // Rust-side spawn + bash_background registry write + protocol round-trip
+    // can legitimately take 200-500ms when the runner is contended. 500ms
+    // gives realistic headroom while staying well under the 1000ms command
+    // duration so the test still proves dispatch < transport < command.
     const launched = await h.bridge.send(
       "bash",
       { command: "sleep 1 && echo slow", timeout: 5_000, compressed: false },
-      { transportTimeoutMs: 100 },
+      { transportTimeoutMs: 500 },
     );
 
     expect(launched.success).toBe(true);

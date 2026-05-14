@@ -72,10 +72,10 @@ export async function resolveIsSubagent(
 
   const cached = cache.get(sessionId);
   if (cached) {
-    // Refresh LRU position
+    // Refresh LRU position. Don't log the hit — it's pure noise; the
+    // downstream call sites already log their effective gate decisions.
     cache.delete(sessionId);
     cache.set(sessionId, cached);
-    sessionLog(sessionId, `[subagent-detect] cache hit: isSubagent=${cached.isSubagent}`);
     return cached.isSubagent;
   }
 
