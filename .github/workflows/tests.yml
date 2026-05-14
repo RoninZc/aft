@@ -80,6 +80,12 @@ jobs:
       - name: Build aft-bridge dist (workspace consumers depend on it)
         run: bun run --cwd packages/aft-bridge build
 
+      - name: Build pi-plugin dist (Pi RPC tests need it)
+        # tests/pi-rpc spawns real Pi processes that load
+        # packages/pi-plugin/dist/index.js. Build it before bun test recurses
+        # into that workspace.
+        run: bun run --cwd packages/pi-plugin build
+
       - name: Cargo build (debug — needed by plugin e2e tests)
         run: cargo build -p agent-file-tools
 
@@ -134,6 +140,12 @@ jobs:
 
       - name: Build aft-bridge dist (workspace consumers depend on it)
         run: bun run --cwd packages/aft-bridge build
+
+      - name: Build pi-plugin dist (Pi RPC tests need it)
+        # tests/pi-rpc spawns real Pi processes that load
+        # packages/pi-plugin/dist/index.js. Build it before bun test recurses
+        # into that workspace.
+        run: bun run --cwd packages/pi-plugin build
 
       - name: Cargo build (debug — needed by plugin e2e tests)
         run: cargo build -p agent-file-tools
@@ -221,6 +233,12 @@ jobs:
 
       - name: Build aft-bridge dist (workspace consumers depend on it)
         run: bun run --cwd packages/aft-bridge build
+
+      - name: Build pi-plugin dist (Pi RPC tests need it)
+        # tests/pi-rpc spawns real Pi processes that load
+        # packages/pi-plugin/dist/index.js. Build it before bun test recurses
+        # into that workspace.
+        run: bun run --cwd packages/pi-plugin build
         shell: pwsh
 
       - name: Cargo build (debug — bash.test.ts spawns the real aft binary)

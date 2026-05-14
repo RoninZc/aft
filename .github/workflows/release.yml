@@ -53,6 +53,13 @@ jobs:
         # (publish-npm runs AFTER this Test job).
         run: bun run --cwd packages/aft-bridge build
 
+      - name: Build pi-plugin dist (Pi RPC tests need it)
+        # `tests/pi-rpc` spawns real Pi processes that load
+        # packages/pi-plugin/dist/index.js. Build it before `bun run test`
+        # so the recursive workspace test pass picks up the fresh dist
+        # instead of failing fast on missing entrypoint.
+        run: bun run --cwd packages/pi-plugin build
+
       - name: TypeScript typecheck
         run: bun run typecheck
 
@@ -116,6 +123,12 @@ jobs:
 
       - name: Build aft-bridge (consumers need its dist/ for typecheck)
         run: bun run --cwd packages/aft-bridge build
+
+      - name: Build pi-plugin dist (Pi RPC tests need it)
+        # See same step in `test` job above. Same reason: workspace
+        # `bun run test` recurses into tests/pi-rpc which spawns Pi
+        # against packages/pi-plugin/dist/index.js.
+        run: bun run --cwd packages/pi-plugin build
 
       - name: TypeScript typecheck
         run: bun run typecheck
