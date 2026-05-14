@@ -513,10 +513,16 @@ impl SemanticEmbeddingModel {
 
                 let raw = send_embedding_request(
                     || {
-                        let mut request = client
-                            .post(&endpoint)
-                            .json(&body)
-                            .header("Content-Type", "application/json");
+                        // `.json(&body)` sets Content-Type: application/json
+                        // automatically. Do NOT add `.header("Content-Type",
+                        // "application/json")` afterwards — RequestBuilder::header()
+                        // calls HeaderMap::append, which produces TWO Content-Type
+                        // headers on the wire. OpenAI's /v1/embeddings endpoint
+                        // treats duplicate Content-Type as malformed and rejects
+                        // the body with 400 "you must provide a model parameter"
+                        // even when `model` is set. Verified end-to-end against
+                        // api.openai.com. See issue #36.
+                        let mut request = client.post(&endpoint).json(&body);
 
                         if let Some(api_key) = api_key {
                             request = request.header("Authorization", format!("Bearer {api_key}"));
@@ -591,10 +597,11 @@ impl SemanticEmbeddingModel {
 
                 let raw = send_embedding_request(
                     || {
-                        client
-                            .post(&endpoint)
-                            .json(&payload)
-                            .header("Content-Type", "application/json")
+                        // `.json(&payload)` sets Content-Type automatically.
+                        // Same duplicate-header trap as the OpenAI branch above
+                        // — most Ollama servers tolerate it, but the
+                        // single-Content-Type form is the correct one.
+                        client.post(&endpoint).json(&payload)
                     },
                     "ollama",
                 )?;
@@ -2600,6 +2607,98 @@ mod tests {
 
         assert_eq!(vectors, vec![vec![0.1, 0.2, 0.3], vec![0.4, 0.5, 0.6]]);
         handle.join().unwrap();
+    }
+
+    /// Regression for issue #36: AFT was sending TWO Content-Type headers
+    /// on the OpenAI embeddings request — once implicitly via `.json(&body)`
+    /// and again explicitly via `.header("Content-Type", "application/json")`.
+    /// reqwest's `.header()` calls `HeaderMap::append`, which produces two
+    /// headers on the wire. OpenAI's /v1/embeddings endpoint rejects that
+    /// with `HTTP 400 "you must provide a model parameter"` even though the
+    /// body actually contains `model`. The fix is to drop the explicit
+    /// `.header("Content-Type", ...)` call. This test pins that we send
+    /// exactly one Content-Type header.
+    #[test]
+    fn openai_compatible_request_has_single_content_type_header() {
+        use std::sync::{Arc, Mutex};
+        let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_thread = Arc::clone(&captured);
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let mut header_end = None;
+            let mut content_length = 0usize;
+            loop {
+                let n = stream.read(&mut chunk).expect("read");
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if header_end.is_none() {
+                    if let Some(pos) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+                        header_end = Some(pos + 4);
+                        for line in String::from_utf8_lossy(&buf[..pos + 4]).lines() {
+                            if let Some(value) = line.strip_prefix("Content-Length:") {
+                                content_length = value.trim().parse::<usize>().unwrap_or(0);
+                            }
+                        }
+                    }
+                }
+                if let Some(end) = header_end {
+                    if buf.len() >= end + content_length {
+                        break;
+                    }
+                }
+            }
+            *captured_for_thread.lock().unwrap() = buf;
+            let body = "{\"data\":[{\"embedding\":[0.1,0.2,0.3],\"index\":0}]}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+
+        let config = SemanticBackendConfig {
+            backend: SemanticBackend::OpenAiCompatible,
+            model: "text-embedding-3-small".to_string(),
+            base_url: Some(format!("http://{}", addr)),
+            api_key_env: None,
+            timeout_ms: 5_000,
+            max_batch_size: 64,
+        };
+        let mut model = SemanticEmbeddingModel::from_config(&config).unwrap();
+        let _ = model.embed(vec!["probe".to_string()]).unwrap();
+        handle.join().unwrap();
+
+        let bytes = captured.lock().unwrap().clone();
+        let request = String::from_utf8_lossy(&bytes);
+
+        // Lowercase line counts because HTTP headers are case-insensitive
+        // and reqwest may emit `content-type` in lowercase under HTTP/2.
+        let content_type_lines = request
+            .lines()
+            .filter(|line| {
+                let lower = line.to_ascii_lowercase();
+                lower.starts_with("content-type:")
+            })
+            .count();
+        assert_eq!(
+            content_type_lines, 1,
+            "expected exactly one Content-Type header but found {content_type_lines}; full request:\n{request}",
+        );
+
+        // The body must still include the model field — pin this so a future
+        // change can't accidentally drop `model` while fixing duplicate headers.
+        assert!(
+            request.contains(r#""model":"text-embedding-3-small""#),
+            "request body should contain model field; full request:\n{request}",
+        );
     }
 
     #[test]
