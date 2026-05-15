@@ -26,7 +26,7 @@ jobs:
     # surprise behavior differences at release time.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -36,7 +36,7 @@ jobs:
         with:
           bun-version: latest
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "24"
 
@@ -97,7 +97,7 @@ jobs:
     # logs instead of a runner timeout.
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -117,7 +117,7 @@ jobs:
         with:
           bun-version: latest
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "24"
 
@@ -159,7 +159,7 @@ jobs:
     timeout-minutes: 20
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -169,7 +169,7 @@ jobs:
         with:
           bun-version: latest
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "24"
 
@@ -207,7 +207,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [test, e2e]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -222,7 +222,7 @@ jobs:
     runs-on: macos-latest
     needs: [test, e2e]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -245,7 +245,7 @@ jobs:
     runs-on: macos-latest
     needs: [test, e2e]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -268,7 +268,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [test, e2e]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -297,7 +297,7 @@ jobs:
     runs-on: ubuntu-22.04
     needs: [test, e2e]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -317,7 +317,7 @@ jobs:
     runs-on: windows-latest
     needs: [test, e2e]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -346,9 +346,9 @@ jobs:
       - build-win32-x64
       - github-release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
@@ -492,7 +492,7 @@ jobs:
       - build-win32-x64
       - publish-crates
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
