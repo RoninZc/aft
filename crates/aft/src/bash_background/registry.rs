@@ -1853,7 +1853,27 @@ mod tests {
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::null());
         let mut child = cmd.spawn().expect("spawn replacement child for reap test");
-        let _ = child.wait();
+        // Poll try_wait() until the child actually exits, instead of calling
+        // wait() which closes the OS handle. On Windows, after wait()
+        // closes the handle, subsequent try_wait() calls (which reap_child
+        // depends on) return Err — the test was inadvertently giving
+        // reap_child an unusable child handle. Polling try_wait() keeps the
+        // handle open and observes natural exit, matching the production
+        // shape where the watchdog discovers an exited child for the first
+        // time.
+        let started = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if started.elapsed() > Duration::from_secs(5) {
+                        panic!("dead-child stand-in did not exit within 5s");
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("dead-child try_wait failed: {error}"),
+            }
+        }
         child
     }
 
@@ -1995,10 +2015,28 @@ mod tests {
         // try_wait path won't be exercised; we're testing the
         // status-transition logic when state.child is set to a dead
         // child OR None and the marker is missing.
+        //
+        // CRITICAL on Windows: the watchdog ticks fast enough that the
+        // JSON on disk may already say `Completed`. `update_task` (called
+        // by `reap_child`) reads from disk, applies the closure, but
+        // ROLLS BACK if the original on-disk state was already terminal
+        // (see persistence.rs::update_task). So we must reset BOTH
+        // in-memory metadata AND the JSON on disk to a Running state to
+        // give reap_child the fresh shape it expects to operate on.
         {
             let mut state = task.state.lock().unwrap();
             state.metadata.status = BgTaskStatus::Running;
             state.metadata.status_reason = None;
+            state.metadata.exit_code = None;
+            state.metadata.finished_at = None;
+            state.metadata.duration_ms = None;
+            // Persist the reset state to disk so update_task's terminal
+            // rollback guard sees a non-terminal starting point.
+            crate::bash_background::persistence::write_task(
+                &task.paths.json,
+                &state.metadata,
+            )
+            .expect("persist reset Running metadata for reap_child test");
             // If the watchdog already nulled state.child, we need to
             // simulate "child exists and is dead" so reap_child's
             // try_wait path runs. Spawn a quick-exit child as a stand-in.
