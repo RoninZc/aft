@@ -59,7 +59,10 @@ describe("fetchUrlToTempFile", () => {
       lookup,
     });
 
-    expect(lookups).toEqual(["example.com"]);
+    // assertPublicUrl runs once on the cache-check path and once again before
+    // the actual fetch, so example.com is resolved twice. The fix in v0.26
+    // ensures cache hits cannot bypass SSRF validation.
+    expect(lookups).toEqual(["example.com", "example.com"]);
     expect(dispatcherIps).toEqual(["93.184.216.34"]);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
@@ -96,7 +99,11 @@ describe("fetchUrlToTempFile", () => {
       lookup,
     });
 
-    expect(lookups).toEqual(["docs.example.com", "cdn.example.com"]);
+    // assertPublicUrl validates each redirect target both at cache-check time
+    // and at fetch time per the v0.26 SSRF cache fix, so docs.example.com is
+    // resolved twice (once for the original cache check, once for the actual
+    // fetch). The redirect target cdn.example.com is resolved once.
+    expect(lookups).toEqual(["docs.example.com", "docs.example.com", "cdn.example.com"]);
     expect(dispatcherIps).toEqual(["93.184.216.34", "8.8.8.8"]);
   });
 });
