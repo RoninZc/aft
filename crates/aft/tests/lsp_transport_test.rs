@@ -38,6 +38,12 @@ struct FakeServerProcess {
 impl FakeServerProcess {
     fn spawn() -> Self {
         let mut child = Command::new(fake_server_binary())
+            // Disable the fake server's didChangeWatchedFiles dynamic registration.
+            // This transport test verifies raw initialize/diagnostics roundtrip; the
+            // registerCapability request the fake server otherwise sends after
+            // `initialized` would arrive before our publishDiagnostics and break
+            // the simple expect-diagnostics-first loop below.
+            .env("AFT_FAKE_LSP_NO_WATCHED_FILES", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
