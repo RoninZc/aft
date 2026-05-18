@@ -54,7 +54,11 @@ async function enableAftBash(env: { workdir: string }): Promise<void> {
 }
 
 async function pollBashStatus(client: RpcClient, taskId: string): Promise<Record<string, unknown>> {
-  const deadline = Date.now() + 30_000;
+  // 90s overall deadline + 60s per-poll wait: under load (cold Pi spawn,
+  // ONNX init, LLM round-trip on shared macOS runners) a single
+  // bash_status round-trip can take 20-40s. The previous 30s deadline
+  // was tight enough that one slow LLM turn would fail the whole test.
+  const deadline = Date.now() + 90_000;
   let attempt = 0;
   const seenToolCallIds = new Set<unknown>();
   while (Date.now() < deadline) {
@@ -67,7 +71,7 @@ async function pollBashStatus(client: RpcClient, taskId: string): Promise<Record
         event.toolName === "bash_status" &&
         !seenToolCallIds.has(event.toolCallId) &&
         resultText(event).includes(taskId),
-      30_000,
+      60_000,
     );
     seenToolCallIds.add(statusEnd.toolCallId);
     if (resultDetails(statusEnd).status === "completed") return statusEnd;
