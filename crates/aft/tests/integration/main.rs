@@ -12,6 +12,7 @@ mod bash_drain_completions_test;
 mod bash_foreground_background_architecture_test;
 mod bash_permissions_test;
 mod bash_rewrite_test;
+mod bash_tasks_dual_write_test;
 mod bash_test;
 mod bash_token_count_test;
 mod callgraph_test;

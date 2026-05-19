@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use lsp_types::FileChangeType;
 use notify::RecommendedWatcher;
+use rusqlite::Connection;
 
 use crate::backup::hash_session;
 use crate::backup::BackupStore;
@@ -282,6 +283,7 @@ pub struct AppContext {
     provider: Box<dyn LanguageProvider>,
     backup: RefCell<BackupStore>,
     checkpoint: RefCell<CheckpointStore>,
+    db: RefCell<Option<Arc<Mutex<Connection>>>>,
     config: RefCell<Config>,
     pub harness: RefCell<Option<Harness>>,
     canonical_cache_root: RefCell<Option<PathBuf>>,
@@ -356,6 +358,7 @@ impl AppContext {
             provider,
             backup: RefCell::new(BackupStore::new()),
             checkpoint: RefCell::new(CheckpointStore::new()),
+            db: RefCell::new(None),
             config: RefCell::new(config),
             harness: RefCell::new(None),
             canonical_cache_root: RefCell::new(None),
@@ -641,6 +644,18 @@ impl AppContext {
         &self.checkpoint
     }
 
+    pub fn set_db(&self, conn: Arc<Mutex<Connection>>) {
+        *self.db.borrow_mut() = Some(conn);
+    }
+
+    pub fn clear_db(&self) {
+        *self.db.borrow_mut() = None;
+    }
+
+    pub fn db(&self) -> Option<Arc<Mutex<Connection>>> {
+        self.db.borrow().clone()
+    }
+
     /// Access the configuration (shared borrow).
     pub fn config(&self) -> Ref<'_, Config> {
         self.config.borrow()
@@ -653,6 +668,7 @@ impl AppContext {
 
     pub fn set_harness(&self, harness: Harness) {
         *self.harness.borrow_mut() = Some(harness);
+        self.bash_background.set_harness(harness);
     }
 
     pub fn harness(&self) -> Harness {

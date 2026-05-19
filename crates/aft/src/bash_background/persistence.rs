@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::backup::hash_session;
+use crate::db::bash_tasks::BashTaskRow;
 
 use super::BgTaskStatus;
 
@@ -120,6 +121,62 @@ impl PersistedTask {
         self.child_pid = None;
         self.status_reason = reason;
         self.completion_delivered = !self.notify_on_completion;
+    }
+
+    pub fn to_bash_task_row(
+        &self,
+        harness: &str,
+        paths: &TaskPaths,
+    ) -> Result<BashTaskRow, serde_json::Error> {
+        let project_root = self.project_root.as_deref().unwrap_or(&self.workdir);
+        let output_bytes = capture_output_bytes(paths);
+        Ok(BashTaskRow {
+            harness: harness.to_string(),
+            session_id: self.session_id.clone(),
+            task_id: self.task_id.clone(),
+            project_key: crate::search_index::project_cache_key(project_root),
+            command: self.command.clone(),
+            cwd: self.workdir.display().to_string(),
+            status: status_name(&self.status).to_string(),
+            exit_code: self.exit_code,
+            pid: self.child_pid.map(i64::from),
+            pgid: self.pgid.map(i64::from),
+            started_at: self.started_at as i64,
+            completed_at: self.finished_at.map(|value| value as i64),
+            stdout_path: Some(paths.stdout.display().to_string()),
+            stderr_path: Some(paths.stderr.display().to_string()),
+            compressed: self.compressed,
+            timeout_ms: self.timeout_ms.map(|value| value as i64),
+            completion_delivered: self.completion_delivered,
+            output_bytes,
+            metadata: serde_json::to_string(self)?,
+        })
+    }
+}
+
+fn status_name(status: &BgTaskStatus) -> &'static str {
+    match status {
+        BgTaskStatus::Starting => "starting",
+        BgTaskStatus::Running => "running",
+        BgTaskStatus::Killing => "killing",
+        BgTaskStatus::Completed => "completed",
+        BgTaskStatus::Failed => "failed",
+        BgTaskStatus::Killed => "killed",
+        BgTaskStatus::TimedOut => "timed_out",
+    }
+}
+
+fn capture_output_bytes(paths: &TaskPaths) -> Option<i64> {
+    let stdout = fs::metadata(&paths.stdout)
+        .ok()
+        .map(|metadata| metadata.len());
+    let stderr = fs::metadata(&paths.stderr)
+        .ok()
+        .map(|metadata| metadata.len());
+    match (stdout, stderr) {
+        (Some(stdout), Some(stderr)) => Some(stdout.saturating_add(stderr) as i64),
+        (Some(bytes), None) | (None, Some(bytes)) => Some(bytes as i64),
+        (None, None) => None,
     }
 }
 

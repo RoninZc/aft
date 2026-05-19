@@ -2,7 +2,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -1202,6 +1202,23 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         ctx.backup()
             .borrow_mut()
             .set_storage_dir(storage_dir, ttl_hours);
+    }
+    let db_path = ctx.storage_dir().join("aft.db");
+    match crate::db::open(&db_path) {
+        Ok(conn) => {
+            let shared = Arc::new(Mutex::new(conn));
+            ctx.set_db(shared.clone());
+            ctx.bash_background().set_db_pool(shared);
+        }
+        Err(err) => {
+            ctx.clear_db();
+            ctx.bash_background().clear_db_pool();
+            slog_warn!(
+                "failed to open aft.db at {}: {} — running with JSON-only persistence",
+                db_path.display(),
+                err
+            );
+        }
     }
     if let Some(v) = params.get("semantic") {
         let current = ctx.config().semantic.clone();

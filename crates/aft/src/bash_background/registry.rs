@@ -5,12 +5,14 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(unix)]
 use std::sync::OnceLock;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use rusqlite::Connection;
 use serde::Serialize;
 
 use crate::context::SharedProgressSender;
+use crate::harness::Harness;
 use crate::protocol::{BashCompletedFrame, BashLongRunningFrame, PushFrame};
 
 #[cfg(unix)]
@@ -126,6 +128,8 @@ pub(crate) struct RegistryInner {
     /// `bash_status`/`list` snapshot reads. When `None`, output is returned
     /// uncompressed.
     pub(crate) compressor: Mutex<Option<Box<dyn Fn(&str, String) -> String + Send + Sync>>>,
+    pub(crate) db_pool: RwLock<Option<Arc<Mutex<Connection>>>>,
+    pub(crate) db_harness: RwLock<Option<String>>,
 }
 
 pub(crate) struct BgTask {
@@ -160,7 +164,27 @@ impl BgTaskRegistry {
                 #[cfg(test)]
                 persisted_gc_runs: AtomicU64::new(0),
                 compressor: Mutex::new(None),
+                db_pool: RwLock::new(None),
+                db_harness: RwLock::new(None),
             }),
+        }
+    }
+
+    pub fn set_harness(&self, harness: Harness) {
+        if let Ok(mut slot) = self.inner.db_harness.write() {
+            *slot = Some(harness.as_str().to_string());
+        }
+    }
+
+    pub fn set_db_pool(&self, conn: Arc<Mutex<Connection>>) {
+        if let Ok(mut slot) = self.inner.db_pool.write() {
+            *slot = Some(conn);
+        }
+    }
+
+    pub fn clear_db_pool(&self) {
+        if let Ok(mut slot) = self.inner.db_pool.write() {
+            *slot = None;
         }
     }
 
@@ -186,6 +210,73 @@ impl BgTaskRegistry {
         match slot.as_ref() {
             Some(compressor) => compressor(command, output),
             None => output,
+        }
+    }
+
+    fn persist_task(&self, paths: &TaskPaths, metadata: &PersistedTask) -> std::io::Result<()> {
+        write_task(&paths.json, metadata)?;
+        self.dual_write_task(paths, metadata);
+        Ok(())
+    }
+
+    fn update_task_metadata<F>(
+        &self,
+        paths: &TaskPaths,
+        update: F,
+    ) -> std::io::Result<PersistedTask>
+    where
+        F: FnOnce(&mut PersistedTask),
+    {
+        let metadata = update_task(&paths.json, update)?;
+        self.dual_write_task(paths, &metadata);
+        Ok(metadata)
+    }
+
+    fn dual_write_task(&self, paths: &TaskPaths, metadata: &PersistedTask) {
+        let pool = self.inner.db_pool.read().ok().and_then(|slot| slot.clone());
+        let Some(pool) = pool else {
+            return;
+        };
+        let harness = self
+            .inner
+            .db_harness
+            .read()
+            .ok()
+            .and_then(|slot| slot.clone());
+        let Some(harness) = harness else {
+            crate::slog_warn!(
+                "dual-write bash_task to DB skipped for {}: harness not configured",
+                metadata.task_id
+            );
+            return;
+        };
+        let row = match metadata.to_bash_task_row(&harness, paths) {
+            Ok(row) => row,
+            Err(error) => {
+                crate::slog_warn!(
+                    "dual-write bash_task to DB failed for {}: {}",
+                    metadata.task_id,
+                    error
+                );
+                return;
+            }
+        };
+        let conn = match pool.lock() {
+            Ok(conn) => conn,
+            Err(_) => {
+                crate::slog_warn!(
+                    "dual-write bash_task to DB failed for {}: db mutex poisoned",
+                    metadata.task_id
+                );
+                return;
+            }
+        };
+        if let Err(error) = crate::db::bash_tasks::upsert_bash_task(&conn, &row) {
+            crate::slog_warn!(
+                "dual-write bash_task to DB failed for {}: {}",
+                metadata.task_id,
+                error
+            );
         }
     }
 
@@ -239,7 +330,7 @@ impl BgTaskRegistry {
             notify_on_completion,
             compressed,
         );
-        write_task(&paths.json, &metadata)
+        self.persist_task(&paths, &metadata)
             .map_err(|e| format!("failed to persist background task metadata: {e}"))?;
 
         // Pre-create capture files so the watchdog/buffer can always
@@ -261,7 +352,7 @@ impl BgTaskRegistry {
 
         let child_pid = child.id();
         metadata.mark_running(child_pid, child_pid as i32);
-        write_task(&paths.json, &metadata)
+        self.persist_task(&paths, &metadata)
             .map_err(|e| format!("failed to persist running background task metadata: {e}"))?;
 
         let task = Arc::new(BgTask {
@@ -329,7 +420,7 @@ impl BgTaskRegistry {
             notify_on_completion,
             compressed,
         );
-        write_task(&paths.json, &metadata)
+        self.persist_task(&paths, &metadata)
             .map_err(|e| format!("failed to persist background task metadata: {e}"))?;
 
         // Capture files are pre-created so the watchdog/buffer can always
@@ -355,7 +446,7 @@ impl BgTaskRegistry {
         metadata.status = BgTaskStatus::Running;
         metadata.child_pid = Some(child_pid);
         metadata.pgid = None;
-        write_task(&paths.json, &metadata)
+        self.persist_task(&paths, &metadata)
             .map_err(|e| format!("failed to persist running background task metadata: {e}"))?;
 
         let task = Arc::new(BgTask {
@@ -456,7 +547,7 @@ impl BgTaskRegistry {
                         None,
                         Some("spawn aborted".to_string()),
                     );
-                    let _ = write_task(&paths.json, &metadata);
+                    let _ = self.persist_task(&paths, &metadata);
                     self.enqueue_completion_if_needed(&metadata, Some(&paths), false);
                     self.insert_rehydrated_task(metadata, paths, true)?;
                 }
@@ -470,7 +561,7 @@ impl BgTaskRegistry {
                         if !paths.exit.exists() {
                             let _ = write_kill_marker_if_absent(&paths.exit);
                         }
-                        let _ = write_task(&paths.json, &metadata);
+                        let _ = self.persist_task(&paths, &metadata);
                         self.enqueue_completion_if_needed(&metadata, Some(&paths), false);
                         self.insert_rehydrated_task(metadata, paths, true)?;
                     } else if let Ok(Some(marker)) = read_exit_marker(&paths.exit) {
@@ -482,7 +573,7 @@ impl BgTaskRegistry {
                             metadata.task_id);
                         }
                         metadata = terminal_metadata_from_marker(metadata, marker, reason);
-                        let _ = write_task(&paths.json, &metadata);
+                        let _ = self.persist_task(&paths, &metadata);
                         self.enqueue_completion_if_needed(&metadata, Some(&paths), false);
                         self.insert_rehydrated_task(metadata, paths, true)?;
                     } else if metadata.status == BgTaskStatus::Killing {
@@ -494,7 +585,7 @@ impl BgTaskRegistry {
                             None,
                             Some("recovered from inconsistent killing state on replay".to_string()),
                         );
-                        let _ = write_task(&paths.json, &metadata);
+                        let _ = self.persist_task(&paths, &metadata);
                         self.enqueue_completion_if_needed(&metadata, Some(&paths), false);
                         self.insert_rehydrated_task(metadata, paths, true)?;
                     } else if metadata.child_pid.is_some_and(|pid| !is_process_alive(pid)) {
@@ -503,7 +594,7 @@ impl BgTaskRegistry {
                             None,
                             Some("process exited without exit marker".to_string()),
                         );
-                        let _ = write_task(&paths.json, &metadata);
+                        let _ = self.persist_task(&paths, &metadata);
                         self.enqueue_completion_if_needed(&metadata, Some(&paths), false);
                         self.insert_rehydrated_task(metadata, paths, true)?;
                     } else {
@@ -783,11 +874,12 @@ impl BgTaskRegistry {
             .state
             .lock()
             .map_err(|_| "background task lock poisoned".to_string())?;
-        let updated = update_task(&task.paths.json, |metadata| {
-            metadata.notify_on_completion = true;
-            metadata.completion_delivered = false;
-        })
-        .map_err(|e| format!("failed to promote background task: {e}"))?;
+        let updated = self
+            .update_task_metadata(&task.paths, |metadata| {
+                metadata.notify_on_completion = true;
+                metadata.completion_delivered = false;
+            })
+            .map_err(|e| format!("failed to promote background task: {e}"))?;
         state.metadata = updated;
         if state.metadata.status.is_terminal() {
             state.buffer.enforce_terminal_cap();
@@ -903,7 +995,7 @@ impl BgTaskRegistry {
         let mut delivered = Vec::new();
         for (task_id, completion_session_id) in acked {
             if let Some(task) = self.task_for_session(&task_id, &completion_session_id) {
-                if task.set_completion_delivered(true).is_ok() {
+                if task.set_completion_delivered(true, self).is_ok() {
                     delivered.push(task_id);
                 }
             }
@@ -1008,7 +1100,7 @@ impl BgTaskRegistry {
         if matches!(read_exit_marker(&task.paths.exit), Ok(Some(_))) {
             return;
         }
-        let updated = update_task(&task.paths.json, |metadata| {
+        let updated = self.update_task_metadata(&task.paths, |metadata| {
             metadata.mark_terminal(
                 BgTaskStatus::Failed,
                 None,
@@ -1095,14 +1187,14 @@ impl BgTaskRegistry {
                 state.child = None;
                 state.detached = true;
                 state.buffer.enforce_terminal_cap();
-                write_task(&task.paths.json, &state.metadata)
+                self.persist_task(&task.paths, &state.metadata)
                     .map_err(|e| format!("failed to persist terminal state: {e}"))?;
                 self.enqueue_completion_locked(&state.metadata, Some(&state.buffer), true);
                 return Ok(task.snapshot_locked(&state, 5 * 1024));
             }
 
             state.metadata.status = BgTaskStatus::Killing;
-            write_task(&task.paths.json, &state.metadata)
+            self.persist_task(&task.paths, &state.metadata)
                 .map_err(|e| format!("failed to persist killing state: {e}"))?;
 
             #[cfg(unix)]
@@ -1135,7 +1227,7 @@ impl BgTaskRegistry {
                 .metadata
                 .mark_terminal(terminal_status, exit_code, None);
             task.mark_terminal_now();
-            write_task(&task.paths.json, &state.metadata)
+            self.persist_task(&task.paths, &state.metadata)
                 .map_err(|e| format!("failed to persist killed state: {e}"))?;
             state.buffer.enforce_terminal_cap();
             self.enqueue_completion_locked(&state.metadata, Some(&state.buffer), true);
@@ -1158,11 +1250,12 @@ impl BgTaskRegistry {
             return Ok(());
         }
 
-        let updated = update_task(&task.paths.json, |metadata| {
-            let new_metadata = terminal_metadata_from_marker(metadata.clone(), marker, reason);
-            *metadata = new_metadata;
-        })
-        .map_err(|e| format!("failed to persist terminal state: {e}"))?;
+        let updated = self
+            .update_task_metadata(&task.paths, |metadata| {
+                let new_metadata = terminal_metadata_from_marker(metadata.clone(), marker, reason);
+                *metadata = new_metadata;
+            })
+            .map_err(|e| format!("failed to persist terminal state: {e}"))?;
         state.metadata = updated;
         task.mark_terminal_now();
         state.child = None;
@@ -1729,15 +1822,20 @@ impl BgTask {
         }
     }
 
-    fn set_completion_delivered(&self, delivered: bool) -> Result<(), String> {
+    fn set_completion_delivered(
+        &self,
+        delivered: bool,
+        registry: &BgTaskRegistry,
+    ) -> Result<(), String> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| "background task lock poisoned".to_string())?;
-        let updated = update_task(&self.paths.json, |metadata| {
-            metadata.completion_delivered = delivered;
-        })
-        .map_err(|e| format!("failed to update completion delivery: {e}"))?;
+        let updated = registry
+            .update_task_metadata(&self.paths, |metadata| {
+                metadata.completion_delivered = delivered;
+            })
+            .map_err(|e| format!("failed to update completion delivery: {e}"))?;
         state.metadata = updated;
         Ok(())
     }
