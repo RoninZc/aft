@@ -57,6 +57,7 @@ pub mod commands;
 pub mod compress;
 pub mod config;
 pub mod context;
+pub mod db;
 pub mod edit;
 pub mod error;
 pub mod extract;
