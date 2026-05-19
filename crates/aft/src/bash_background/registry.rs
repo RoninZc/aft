@@ -1481,8 +1481,96 @@ impl BgTaskRegistry {
             return;
         }
 
+        self.record_compression_event_if_applicable(metadata, &token_counts);
+
         if emit_frame {
             self.emit_bash_completed(completion);
+        }
+    }
+
+    fn record_compression_event_if_applicable(
+        &self,
+        metadata: &PersistedTask,
+        token_counts: &CompletionTokenCounts,
+    ) {
+        let (original_tokens, compressed_tokens, original_bytes, compressed_bytes) = match (
+            token_counts.original_tokens,
+            token_counts.compressed_tokens,
+            token_counts.original_bytes,
+            token_counts.compressed_bytes,
+        ) {
+            (
+                Some(original_tokens),
+                Some(compressed_tokens),
+                Some(original_bytes),
+                Some(compressed_bytes),
+            ) => (
+                original_tokens,
+                compressed_tokens,
+                original_bytes,
+                compressed_bytes,
+            ),
+            _ => return,
+        };
+
+        let pool = self.inner.db_pool.read().ok().and_then(|slot| slot.clone());
+        let Some(pool) = pool else {
+            return;
+        };
+        let harness = self
+            .inner
+            .db_harness
+            .read()
+            .ok()
+            .and_then(|slot| slot.clone());
+        let Some(harness) = harness else {
+            crate::slog_warn!(
+                "compression event insert skipped for {}: harness not configured",
+                metadata.task_id
+            );
+            return;
+        };
+
+        let project_root = metadata
+            .project_root
+            .as_deref()
+            .unwrap_or(&metadata.workdir);
+        let project_key = crate::search_index::project_cache_key(project_root);
+        let row = crate::db::compression_events::CompressionEventRow {
+            harness: &harness,
+            session_id: Some(&metadata.session_id),
+            project_key: &project_key,
+            tool: "bash",
+            task_id: Some(&metadata.task_id),
+            command: Some(&metadata.command),
+            compressor: if metadata.compressed {
+                "registry"
+            } else {
+                "none"
+            },
+            original_bytes,
+            compressed_bytes,
+            original_tokens,
+            compressed_tokens,
+            created_at: unix_millis() as i64,
+        };
+
+        let conn = match pool.lock() {
+            Ok(conn) => conn,
+            Err(_) => {
+                crate::slog_warn!(
+                    "compression event insert failed for {}: db mutex poisoned",
+                    metadata.task_id
+                );
+                return;
+            }
+        };
+        if let Err(error) = crate::db::compression_events::insert_compression_event(&conn, &row) {
+            crate::slog_warn!(
+                "compression event insert failed for {}: {}",
+                metadata.task_id,
+                error
+            );
         }
     }
 
@@ -1537,15 +1625,19 @@ impl BgTaskRegistry {
         };
 
         let original_tokens = token_count_u32(&raw_output);
+        let original_bytes = raw_output.len() as i64;
         let compressed_output = if metadata.compressed {
             self.compress_output(&metadata.command, raw_output)
         } else {
             raw_output
         };
         let compressed_tokens = token_count_u32(&compressed_output);
+        let compressed_bytes = compressed_output.len() as i64;
         CompletionTokenCounts {
             original_tokens: Some(original_tokens),
             compressed_tokens: Some(compressed_tokens),
+            original_bytes: Some(original_bytes),
+            compressed_bytes: Some(compressed_bytes),
             tokens_skipped: false,
         }
     }
@@ -1677,6 +1769,8 @@ impl BgTaskRegistry {
 struct CompletionTokenCounts {
     original_tokens: Option<u32>,
     compressed_tokens: Option<u32>,
+    original_bytes: Option<i64>,
+    compressed_bytes: Option<i64>,
     tokens_skipped: bool,
 }
 
@@ -1685,6 +1779,8 @@ impl CompletionTokenCounts {
         Self {
             original_tokens: None,
             compressed_tokens: None,
+            original_bytes: None,
+            compressed_bytes: None,
             tokens_skipped: true,
         }
     }
