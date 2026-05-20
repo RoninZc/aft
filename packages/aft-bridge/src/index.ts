@@ -60,6 +60,9 @@ export type {
   ConfigureWarningFrame,
   PermissionAskFrame,
   ProgressFrame,
+  StatusCompression,
+  StatusCompressionAggregate,
+  StatusResponse,
 } from "./protocol.js";
 export { findBinary, findBinarySync, platformKey } from "./resolver.js";
 // --- URL fetch (shared by aft_outline / aft_zoom URL targets) ---

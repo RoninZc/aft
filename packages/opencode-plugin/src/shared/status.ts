@@ -1,3 +1,15 @@
+export interface StatusCompressionAggregate {
+  events: number;
+  original_tokens: number;
+  compressed_tokens: number;
+  savings_tokens: number;
+}
+
+export interface StatusCompression {
+  project: StatusCompressionAggregate;
+  session: StatusCompressionAggregate;
+}
+
 export interface AftStatusSnapshot {
   version: string;
   project_root: string | null;
@@ -57,6 +69,8 @@ export interface AftStatusSnapshot {
     tracked_files: number;
     checkpoints: number;
   };
+  /** Compression aggregate passthrough; rendering is added separately. */
+  compression?: StatusCompression;
   /**
    * Human-readable explanation for a synthetic snapshot (e.g.
    * `cache_role === "not_initialized"`). When the plugin returns a placeholder
@@ -89,6 +103,25 @@ function readNumber(value: unknown, fallback = 0): number {
 
 function readOptionalNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function readCompressionAggregate(value: unknown): StatusCompressionAggregate {
+  const aggregate = asRecord(value);
+  return {
+    events: readNumber(aggregate.events),
+    original_tokens: readNumber(aggregate.original_tokens),
+    compressed_tokens: readNumber(aggregate.compressed_tokens),
+    savings_tokens: readNumber(aggregate.savings_tokens),
+  };
+}
+
+function readCompression(value: unknown): StatusCompression | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const compression = asRecord(value);
+  return {
+    project: readCompressionAggregate(compression.project),
+    session: readCompressionAggregate(compression.session),
+  };
 }
 
 function formatFlag(enabled: boolean): string {
@@ -178,6 +211,7 @@ export function coerceAftStatus(response: Record<string, unknown>): AftStatusSna
       tracked_files: readNumber(session.tracked_files),
       checkpoints: readNumber(session.checkpoints),
     },
+    compression: readCompression(response.compression),
     message: readString(response.message, ""),
   };
 }

@@ -34,6 +34,18 @@ describe("shared status helpers", () => {
     expect(status.symbol_cache.warm_entries).toBe(0);
   });
 
+  test("pi_status_snapshot_includes_compression_passthrough", () => {
+    const status = coerceAftStatus({
+      compression: {
+        project: { events: 3, original_tokens: 300, compressed_tokens: 210, savings_tokens: 90 },
+        session: { events: 1, original_tokens: 100, compressed_tokens: 70, savings_tokens: 30 },
+      },
+    });
+
+    expect(status.compression?.project.events).toBe(3);
+    expect(status.compression?.session.savings_tokens).toBe(30);
+  });
+
   test("formatBytes handles zero, fractions, and large units", () => {
     expect(formatBytes(0)).toBe("0 B");
     expect(formatBytes(512)).toBe("512 B");

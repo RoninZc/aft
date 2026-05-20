@@ -44,6 +44,19 @@ describe("coerceAftStatus", () => {
     expect(status.semantic_index.model).toBe("text-embedding-3-small");
     expect(status.semantic_index).not.toHaveProperty("api_key_env");
   });
+
+  test("opencode_status_snapshot_includes_compression_passthrough", () => {
+    const status = coerceAftStatus({
+      ...baseResponse,
+      compression: {
+        project: { events: 3, original_tokens: 300, compressed_tokens: 210, savings_tokens: 90 },
+        session: { events: 1, original_tokens: 100, compressed_tokens: 70, savings_tokens: 30 },
+      },
+    } as unknown as Record<string, unknown>);
+
+    expect(status.compression?.project.events).toBe(3);
+    expect(status.compression?.session.savings_tokens).toBe(30);
+  });
 });
 
 describe("formatStatus* output", () => {

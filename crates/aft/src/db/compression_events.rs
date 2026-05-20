@@ -15,6 +15,19 @@ pub struct CompressionEventRow<'a> {
     pub created_at: i64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct CompressionAggregate {
+    pub events: u64,
+    pub original_tokens: u64,
+    pub compressed_tokens: u64,
+}
+
+impl CompressionAggregate {
+    pub fn savings_tokens(&self) -> u64 {
+        self.original_tokens.saturating_sub(self.compressed_tokens)
+    }
+}
+
 pub fn insert_compression_event(
     conn: &Connection,
     row: &CompressionEventRow<'_>,
@@ -52,4 +65,55 @@ pub fn insert_compression_event(
         ],
     )?;
     Ok(())
+}
+
+pub fn aggregate_for_project(
+    conn: &Connection,
+    harness: &str,
+    project_key: &str,
+) -> rusqlite::Result<CompressionAggregate> {
+    conn.query_row(
+        r#"
+        SELECT
+            COUNT(*) AS events,
+            COALESCE(SUM(original_tokens), 0) AS original,
+            COALESCE(SUM(compressed_tokens), 0) AS compressed
+        FROM compression_events
+        WHERE harness = ?1 AND project_key = ?2
+        "#,
+        params![harness, project_key],
+        |row| {
+            Ok(CompressionAggregate {
+                events: row.get::<_, i64>(0)? as u64,
+                original_tokens: row.get::<_, i64>(1)? as u64,
+                compressed_tokens: row.get::<_, i64>(2)? as u64,
+            })
+        },
+    )
+}
+
+pub fn aggregate_for_session(
+    conn: &Connection,
+    harness: &str,
+    project_key: &str,
+    session_id: &str,
+) -> rusqlite::Result<CompressionAggregate> {
+    conn.query_row(
+        r#"
+        SELECT
+            COUNT(*) AS events,
+            COALESCE(SUM(original_tokens), 0) AS original,
+            COALESCE(SUM(compressed_tokens), 0) AS compressed
+        FROM compression_events
+        WHERE harness = ?1 AND project_key = ?2 AND session_id = ?3
+        "#,
+        params![harness, project_key, session_id],
+        |row| {
+            Ok(CompressionAggregate {
+                events: row.get::<_, i64>(0)? as u64,
+                original_tokens: row.get::<_, i64>(1)? as u64,
+                compressed_tokens: row.get::<_, i64>(2)? as u64,
+            })
+        },
+    )
 }

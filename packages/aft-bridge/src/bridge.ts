@@ -5,7 +5,7 @@ import { StringDecoder } from "node:string_decoder";
 
 import { error, getActiveLogger, getLogFilePath, log, warn } from "./active-logger.js";
 import type { Logger, LogMeta } from "./logger.js";
-import type { BgCompletion } from "./protocol.js";
+import type { BgCompletion, StatusCompression } from "./protocol.js";
 
 const DEFAULT_BRIDGE_TIMEOUT_MS = 30_000;
 const SEMANTIC_TIMEOUT_SAFETY_MARGIN_MS = 5_000;
@@ -218,6 +218,7 @@ export interface StatusSnapshot {
   symbol_cache?: Record<string, unknown>;
   storage_dir?: string | null;
   features?: Record<string, unknown>;
+  compression?: StatusCompression;
   [key: string]: unknown;
 }
 

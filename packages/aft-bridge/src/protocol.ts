@@ -40,6 +40,22 @@ export interface AftErrorResponse {
 
 export type AftResponse = AftSuccessResponse | AftErrorResponse;
 
+export interface StatusCompressionAggregate {
+  events: number;
+  original_tokens: number;
+  compressed_tokens: number;
+  savings_tokens: number;
+}
+
+export interface StatusCompression {
+  project: StatusCompressionAggregate;
+  session: StatusCompressionAggregate;
+}
+
+export interface StatusResponse extends AftSuccessResponse {
+  compression?: StatusCompression;
+}
+
 /**
  * Server-pushed frames (no client-side `id`). The transport recognises these
  * and dispatches them through {@link BridgeOptions.onPushFrame} rather than

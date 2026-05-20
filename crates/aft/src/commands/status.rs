@@ -2,7 +2,33 @@
 
 use crate::context::AppContext;
 use crate::context::SemanticIndexStatus;
+use crate::db::compression_events::CompressionAggregate;
 use crate::protocol::{RawRequest, Response, StatusPayload, DEFAULT_SESSION_ID};
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct CompressionStats {
+    pub project: CompressionAggregateSerde,
+    pub session: CompressionAggregateSerde,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct CompressionAggregateSerde {
+    pub events: u64,
+    pub original_tokens: u64,
+    pub compressed_tokens: u64,
+    pub savings_tokens: u64,
+}
+
+impl From<CompressionAggregate> for CompressionAggregateSerde {
+    fn from(agg: CompressionAggregate) -> Self {
+        Self {
+            events: agg.events,
+            original_tokens: agg.original_tokens,
+            compressed_tokens: agg.compressed_tokens,
+            savings_tokens: agg.savings_tokens(),
+        }
+    }
+}
 
 pub fn handle_status(req: &RawRequest, ctx: &AppContext) -> Response {
     Response::success(
@@ -146,6 +172,7 @@ impl AppContext {
         let checkpoint_total = self.checkpoint().borrow().total_count();
         let session_checkpoints = self.checkpoint().borrow().list(session_id).len();
         let session_tracked_files = self.backup().borrow().tracked_files(session_id).len();
+        let compression = self.compression_stats_for_session(session_id);
 
         // Degraded-mode reasons recorded by `handle_configure` when the
         // project root doesn't look like a real project (`home_root`) or the
@@ -176,6 +203,7 @@ impl AppContext {
             "disk": disk_info,
             "lsp_servers": lsp_count,
             "symbol_cache": symbol_cache_stats,
+            "compression": compression,
             "storage_dir": storage_dir,
             // Project-wide (all sessions): total in-memory checkpoint count.
             "checkpoints_total": checkpoint_total,
@@ -186,6 +214,37 @@ impl AppContext {
                 "checkpoints": session_checkpoints,
             },
         })
+    }
+
+    fn compression_stats_for_session(&self, session_id: &str) -> CompressionStats {
+        let mut compression = CompressionStats::default();
+        let Some(project_root) = self.config().project_root.clone() else {
+            return compression;
+        };
+        let Some(db) = self.db() else {
+            return compression;
+        };
+        let Ok(conn) = db.lock() else {
+            return compression;
+        };
+
+        let harness = self.harness().as_str();
+        let project_key = crate::search_index::project_cache_key(&project_root);
+        if let Ok(project_agg) =
+            crate::db::compression_events::aggregate_for_project(&conn, harness, &project_key)
+        {
+            compression.project = project_agg.into();
+        }
+        if let Ok(session_agg) = crate::db::compression_events::aggregate_for_session(
+            &conn,
+            harness,
+            &project_key,
+            session_id,
+        ) {
+            compression.session = session_agg.into();
+        }
+
+        compression
     }
 }
 
