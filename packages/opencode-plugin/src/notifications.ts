@@ -380,6 +380,7 @@ export async function sendFeatureAnnouncement(
   opts: NotificationOptions,
   version: string,
   features: string[],
+  footer: string,
   storageDir?: string,
 ): Promise<void> {
   // Check if we already announced this version (persisted across sessions)
@@ -401,7 +402,13 @@ export async function sendFeatureAnnouncement(
     }
   }
 
-  const featureText = features.map((f) => `• ${f}`).join("\n");
+  // Blank-line separator pins the persistent footer (Discord invite, etc.)
+  // below the version-specific bullets so the footer reads as "always here"
+  // rather than as one more changelog item.
+  const hasFooter = typeof footer === "string" && footer.trim().length > 0;
+  const featureText = hasFooter
+    ? [features.map((f) => `• ${f}`).join("\n"), "", footer].join("\n")
+    : features.map((f) => `• ${f}`).join("\n");
 
   // Try TUI toast first (works when client exposes tui.showToast),
   // fall back to Desktop ignored message
@@ -410,7 +417,12 @@ export async function sendFeatureAnnouncement(
     const { sessionId } = readDesktopState(opts.directory);
     if (!sessionId) return;
 
-    const text = [`${FEATURE_MARKER} v${version}:`, ...features.map((f) => `  • ${f}`)].join("\n");
+    const sections: string[] = [
+      `${FEATURE_MARKER} v${version}:`,
+      ...features.map((f) => `  • ${f}`),
+    ];
+    if (hasFooter) sections.push("", footer);
+    const text = sections.join("\n");
     sessionLog(sessionId, `[aft-plugin] sending feature announcement for v${version}`);
     await sendIgnoredMessage(opts.client, sessionId, text);
   }

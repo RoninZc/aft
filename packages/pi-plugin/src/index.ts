@@ -175,8 +175,16 @@ const ANNOUNCEMENT_FEATURES: string[] = [
   "Bash hoisting is now default-on. Configure with top-level `bash: { rewrite, compress, background }` instead of `experimental.bash.*` — old config migrates automatically on first launch.",
   "Vue, Astro, and Svelte language servers now auto-install when the framework appears in your package.json (fixes #48).",
   "Native Windows ARM64 binary — ARM64 hosts no longer fall back to x64 under emulation.",
-  "Join us on Discord: https://discord.gg/F2uWxjGnU",
 ];
+
+/**
+ * Persistent footer rendered below the version-specific bullets in every
+ * announcement. Stays in place across releases so users always see the Discord
+ * invite without us needing to repeat it in `ANNOUNCEMENT_FEATURES` each time.
+ *
+ * Leave empty (`""`) to suppress.
+ */
+const ANNOUNCEMENT_FOOTER = "Join us on Discord: https://discord.gg/F2uWxjGnU";
 
 const ALL_ONLY_TOOLS = new Set([
   "aft_navigate",
@@ -662,7 +670,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   })();
 
   if (ANNOUNCEMENT_VERSION && ANNOUNCEMENT_FEATURES.length > 0) {
-    sendFeatureAnnouncement(ANNOUNCEMENT_VERSION, ANNOUNCEMENT_FEATURES, storageDir);
+    sendFeatureAnnouncement(
+      ANNOUNCEMENT_VERSION,
+      ANNOUNCEMENT_FEATURES,
+      ANNOUNCEMENT_FOOTER,
+      storageDir,
+    );
   }
 
   const surface = resolveToolSurface(config);

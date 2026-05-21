@@ -165,8 +165,16 @@ const ANNOUNCEMENT_FEATURES: string[] = [
   "Bash hoisting is now default-on. Configure with top-level `bash: { rewrite, compress, background }` instead of `experimental.bash.*` — old config migrates automatically on first launch.",
   "Vue, Astro, and Svelte language servers now auto-install when the framework appears in your package.json (fixes #48).",
   "Native Windows ARM64 binary — ARM64 hosts no longer fall back to x64 under emulation.",
-  "Join us on Discord: https://discord.gg/F2uWxjGnU",
 ];
+
+/**
+ * Persistent footer rendered below the version-specific bullets in every
+ * announcement. Stays in place across releases so users always see the Discord
+ * invite without us needing to repeat it in `ANNOUNCEMENT_FEATURES` each time.
+ *
+ * Leave empty (`""`) to suppress.
+ */
+const ANNOUNCEMENT_FOOTER = "Join us on Discord: https://discord.gg/F2uWxjGnU";
 
 /**
  * AFT (Agent File Toolkit) plugin for OpenCode.
@@ -632,7 +640,12 @@ async function initializePluginForDirectory(input: Parameters<Plugin>[0]) {
         // proceed
       }
     }
-    return { show: true, version: ANNOUNCEMENT_VERSION, features: ANNOUNCEMENT_FEATURES };
+    return {
+      show: true,
+      version: ANNOUNCEMENT_VERSION,
+      features: ANNOUNCEMENT_FEATURES,
+      footer: ANNOUNCEMENT_FOOTER,
+    };
   });
 
   rpcServer.handle("mark-announced", async () => {
@@ -692,6 +705,7 @@ async function initializePluginForDirectory(input: Parameters<Plugin>[0]) {
         notifyOpts,
         ANNOUNCEMENT_VERSION,
         ANNOUNCEMENT_FEATURES,
+        ANNOUNCEMENT_FOOTER,
         storageDir,
       ).catch(() => {});
     }, 8000);

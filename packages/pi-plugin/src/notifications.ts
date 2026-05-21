@@ -144,6 +144,7 @@ export async function deliverConfigureWarnings(
 export function sendFeatureAnnouncement(
   version: string,
   features: string[],
+  footer: string,
   storageDir: string,
 ): void {
   // v0.27 commit 11 deferral: the legacy `last_announced_version` file is read at
@@ -162,9 +163,17 @@ export function sendFeatureAnnouncement(
     // ignore read errors — proceed with announcement
   }
 
-  log(
-    [`${FEATURE_MARKER} v${version}:`, ...features.map((feature) => `  • ${feature}`)].join("\n"),
-  );
+  // Blank-line separator pins the persistent footer (Discord invite, etc.)
+  // below the version-specific bullets so the footer reads as "always here"
+  // rather than as one more changelog item.
+  const sections: string[] = [
+    `${FEATURE_MARKER} v${version}:`,
+    ...features.map((feature) => `  • ${feature}`),
+  ];
+  if (typeof footer === "string" && footer.trim().length > 0) {
+    sections.push("", footer);
+  }
+  log(sections.join("\n"));
 
   try {
     mkdirSync(storageDir, { recursive: true });

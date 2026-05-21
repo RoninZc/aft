@@ -547,16 +547,24 @@ async function showStartupNotifications(api: TuiPluginApi): Promise<void> {
       show?: boolean;
       version?: string;
       features?: string[];
+      footer?: string;
     };
 
     if (announcement.show && announcement.version && announcement.features?.length) {
       const featureText = announcement.features.map((f: string) => `  • ${f}`).join("\n");
+      // Blank-line separator distinguishes the persistent footer (Discord
+      // invite, etc.) from the version-specific bullets.
+      const hasFooter =
+        typeof announcement.footer === "string" && announcement.footer.trim().length > 0;
+      const message = hasFooter
+        ? `What's new:\n\n${featureText}\n\n${announcement.footer}`
+        : `What's new:\n\n${featureText}`;
 
       api.ui.dialog.replace(
         () => (
           <api.ui.DialogAlert
             title={`AFT v${announcement.version}`}
-            message={`What's new:\n\n${featureText}`}
+            message={message}
             onConfirm={() => {
               // Mark as announced so it doesn't show again
               void client.call("mark-announced", {});
