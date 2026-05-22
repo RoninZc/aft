@@ -40,6 +40,7 @@ import {
   sendFeatureAnnouncement,
   sendWarning,
 } from "./notifications.js";
+import { isBunRuntime, probeServerReachable } from "./shared/live-server-client.js";
 import { AftRpcServer } from "./shared/rpc-server.js";
 import {
   getSessionDirectory,
@@ -513,6 +514,36 @@ async function initializePluginForDirectory(input: Parameters<Plugin>[0]) {
     config: aftConfig,
     storageDir: configOverrides.storage_dir as string,
   };
+
+  // TUI `--port 0` nudge: under Bun runtime (OpenCode TUI), probe whether
+  // `input.serverUrl` actually accepts API requests. TUI started without
+  // `--port 0` binds an internal-only listener that 404s for /session/*,
+  // which breaks the live-server-client workaround for the promptAsync
+  // runner-split bug. If we detect that case here, set a flag and the
+  // first `chat.message` hook for each session delivers a one-time
+  // ignored message instructing the user to relaunch with `--port 0`.
+  // Reachable serverUrl (Desktop with Electron+Node, or TUI launched with
+  // `--port 0`) → no nudge. Probe runs in background so plugin init isn't
+  // blocked on the HTTP timeout.
+  let tuiPortZeroNudgeNeeded = false;
+  if (isBunRuntime()) {
+    void probeServerReachable(input.serverUrl?.toString())
+      .then((reachable) => {
+        tuiPortZeroNudgeNeeded = !reachable;
+        if (!reachable) {
+          log(
+            "Detected OpenCode TUI without --port 0; live HTTP listener unreachable. " +
+              "Will nudge once per session to restart with --port 0 (anomalyco/opencode#28202).",
+          );
+        }
+      })
+      .catch(() => {
+        // Probe failures are treated as "unreachable" so user still sees the
+        // nudge — they can't possibly be worse off.
+        tuiPortZeroNudgeNeeded = true;
+      });
+  }
+  const tuiNudgeSentSessions = new Set<string>();
   // Settle the ONNX runtime download promise (started above) and patch the
   // resolved path into the pool's configure overrides. Bridges spawned AFTER
   // this resolves will pass `_ort_dylib_dir` through configure and pick up
@@ -886,6 +917,21 @@ async function initializePluginForDirectory(input: Parameters<Plugin>[0]) {
       // Eagerly warm the session-directory cache so the first tool call from
       // this turn routes to the right project (covers `opencode -s`-from-cwd).
       warmSessionDirectory(input.client, sid, input.directory);
+
+      // One-time per-session `--port 0` nudge for TUI users without it.
+      // Delivered via in-process `sendIgnoredMessage` so the user sees it
+      // regardless of whether the live listener is reachable (in fact,
+      // unreachability is the very condition that triggers this path).
+      if (tuiPortZeroNudgeNeeded && typeof sid === "string" && sid.length > 0) {
+        if (!tuiNudgeSentSessions.has(sid)) {
+          tuiNudgeSentSessions.add(sid);
+          const nudge =
+            "Due to a bug in opencode (https://github.com/anomalyco/opencode/issues/28202), background bash notifications are now using a workaround which needs opencode to be run via `opencode --port 0` in TUI mode. Opencode Desktop doesn't need special treatment.";
+          void sendIgnoredMessage(input.client, sid, nudge).catch(() => {
+            // best-effort
+          });
+        }
+      }
     },
     "command.execute.before": async (
       commandInput: { command: string; sessionID: string },
