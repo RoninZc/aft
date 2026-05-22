@@ -470,9 +470,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     const lspVersions = config.lsp?.versions ?? {};
     const lspDisabled = new Set(config.lsp?.disabled ?? []);
     const projectRoot = process.cwd();
-    configOverrides.lsp_auto_install_binaries = [
-      ...new Set([...NPM_LSP_TABLE, ...GITHUB_LSP_TABLE].map((spec) => spec.binary)),
-    ];
+    // When `lsp.auto_install: false`, leave the list empty so the Rust-side
+    // `detect_missing_lsp_binaries` loop in configure.rs skips its built-in
+    // server walk entirely. Without this gate, users who opted out of
+    // auto-install still received `lsp_binary_missing` toasts/log warnings
+    // on every configure. Explicit `lsp.servers` entries are unaffected.
+    configOverrides.lsp_auto_install_binaries = lspAutoInstall
+      ? [...new Set([...NPM_LSP_TABLE, ...GITHUB_LSP_TABLE].map((spec) => spec.binary))]
+      : [];
 
     const npmResult = runAutoInstall(projectRoot, {
       autoInstall: lspAutoInstall,

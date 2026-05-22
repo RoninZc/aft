@@ -298,9 +298,15 @@ async function initializePluginForDirectory(input: Parameters<Plugin>[0]) {
     const lspGraceDays = aftConfig.lsp?.grace_days ?? 7;
     const lspVersions = aftConfig.lsp?.versions ?? {};
     const lspDisabled = new Set(aftConfig.lsp?.disabled ?? []);
-    configOverrides.lsp_auto_install_binaries = [
-      ...new Set([...NPM_LSP_TABLE, ...GITHUB_LSP_TABLE].map((spec) => spec.binary)),
-    ];
+    // When `lsp.auto_install: false`, leave the list empty so the Rust-side
+    // `detect_missing_lsp_binaries` loop in configure.rs skips its built-in
+    // server walk entirely. Without this gate, users who opted out of
+    // auto-install still received `lsp_binary_missing` toasts/ignored-message
+    // warnings on every configure. Explicit `lsp.servers` entries are
+    // unaffected — those still warn (they're user-configured, not auto).
+    configOverrides.lsp_auto_install_binaries = lspAutoInstall
+      ? [...new Set([...NPM_LSP_TABLE, ...GITHUB_LSP_TABLE].map((spec) => spec.binary))]
+      : [];
 
     const npmResult = runAutoInstall(input.directory, {
       autoInstall: lspAutoInstall,

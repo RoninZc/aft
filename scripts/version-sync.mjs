@@ -15,7 +15,7 @@
  *   6.   aft-bridge/package.json → version field
  *   7.   aft-opencode/package.json → version field + all optionalDependencies versions + aft-bridge dep
  *   8.   aft-pi/package.json → version field + all optionalDependencies versions + aft-bridge dep
- *   9.   aft-cli/package.json → version field
+ *   9.   aft-cli/package.json → version field + aft-bridge dep (workspace:* → semver)
  *   10.  Cargo.toml → version field
  */
 
@@ -222,8 +222,16 @@ results.push(
 );
 
 // 9: @cortexkit/aft (unified CLI)
+// internalDeps: true rewrites `@cortexkit/aft-bridge: "workspace:*"` → the
+// real semver at publish time. Bun resolves workspace:* in local dev but
+// `npm publish` does not, so without this rewrite the published tarball
+// leaks the protocol literally and `npx @cortexkit/aft@<version>` fails
+// with EUNSUPPORTEDPROTOCOL on install. See note for v0.28.0 → v0.28.1
+// regression: aft-bridge wasn't a runtime dep of the CLI before #46 added
+// doctor --fix's ensureBinary() call, so this gap stayed latent until that
+// commit shipped.
 const cliPath = join(root, "packages", "aft-cli", "package.json");
-results.push(updateJsonFile(cliPath, version, {}, dryRun));
+results.push(updateJsonFile(cliPath, version, { internalDeps: true }, dryRun));
 
 // 10: Cargo.toml — agent-file-tools (main crate)
 const cargoPath = join(root, "crates", "aft", "Cargo.toml");

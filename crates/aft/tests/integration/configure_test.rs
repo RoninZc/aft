@@ -325,6 +325,55 @@ fn configure_warns_for_custom_lsp_regardless_of_auto_install_set() {
 }
 
 #[test]
+fn configure_skips_builtin_lsp_warnings_when_auto_install_disabled() {
+    // Regression for the recurring "AFT keeps bugging me about cannot install"
+    // UX bug after users set `lsp.auto_install: false` in aft.jsonc.
+    //
+    // Repro: project has a `.ts` file → built-in `typescript-language-server`
+    // matches. User sets `lsp.auto_install: false`. Plugins now send
+    // `lsp_auto_install_binaries: []` to Rust to short-circuit the built-in
+    // server walk in `detect_missing_lsp_binaries`. The result should be ZERO
+    // `lsp_binary_missing` warnings for the built-in. (Explicit `lsp.servers`
+    // entries are unaffected — see `configure_warns_for_custom_lsp_*`.)
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("app.ts"), "const x = 1;\n").unwrap();
+
+    let path = empty_path();
+    let mut aft = AftProcess::spawn_with_env(&[("PATH", path.as_os_str())]);
+
+    let configure = aft.send(
+        &json!({
+            "id": "cfg-auto-install-off",
+            "command": "configure",
+            "harness": "opencode",
+            "project_root": dir.path(),
+            // Plugins send an EMPTY list when `lsp.auto_install: false`.
+            "lsp_auto_install_binaries": [],
+        })
+        .to_string(),
+    );
+
+    assert_eq!(
+        configure["success"], true,
+        "configure should succeed: {configure:?}"
+    );
+    let configure = aft.merge_configure_warnings(configure);
+    assert!(
+        warning_with_kind(
+            &configure,
+            "lsp_binary_missing",
+            "binary",
+            "typescript-language-server",
+        )
+        .is_none(),
+        "no built-in lsp_binary_missing warning expected when auto_install_binaries is empty: {configure:?}"
+    );
+
+    let shutdown = aft.shutdown();
+    assert!(shutdown.success());
+}
+
+#[test]
 fn configure_warnings_wait_consumes_pending_frame_before_reading_stdout() {
     let mut aft = AftProcess::spawn();
 
