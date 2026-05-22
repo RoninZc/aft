@@ -336,8 +336,13 @@ describe("Pi background notifications", () => {
     await sleep(120);
 
     expect(sendUserMessage).toHaveBeenCalledTimes(1);
+    // Lower bound proves debounce-cap actually delayed the wake past ~1s,
+    // which is the behavior we care about. Upper bound is just sanity —
+    // under heavy parallel load (release.sh full-suite or CI runners)
+    // setTimeout drift on a busy event loop pushes total elapsed time past
+    // 1400ms; we widen it to ~1800ms to deflake without losing the assertion.
     expect(Date.now() - started).toBeGreaterThanOrEqual(950);
-    expect(Date.now() - started).toBeLessThan(1400);
+    expect(Date.now() - started).toBeLessThan(1800);
   });
 
   test("second background completion wakes without input reset", async () => {
