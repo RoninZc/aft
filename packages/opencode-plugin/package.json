@@ -18,7 +18,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target bun --format esm --external @opencode-ai/plugin && bun build src/tui/index.tsx --outfile dist/tui.js --target bun --format esm --external @opencode-ai/plugin --external @opencode-ai/plugin/tui --external @opentui/solid --external solid-js && tsc --emitDeclarationOnly",
+    "build": "bun build src/index.ts --outdir dist --target node --format esm --external @opencode-ai/plugin --external @opencode-ai/sdk && bun build src/tui/index.tsx --outfile dist/tui.js --target node --format esm --external @opencode-ai/plugin --external @opencode-ai/plugin/tui --external @opencode-ai/sdk --external @opentui/solid --external solid-js && tsc --emitDeclarationOnly",
     "typecheck": "tsc --noEmit",
     "pretest": "cd ../.. && cargo build",
     "test": "bun test",
