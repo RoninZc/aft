@@ -1,5 +1,5 @@
 use crate::compress::generic::GenericCompressor;
-use crate::compress::Compressor;
+use crate::compress::{Compressor, Specificity};
 
 pub struct BunCompressor;
 
@@ -9,6 +9,10 @@ pub struct BunCompressor;
 const MAX_FAILURES: usize = 25;
 
 impl Compressor for BunCompressor {
+    fn specificity(&self) -> Specificity {
+        Specificity::PackageManager
+    }
+
     fn matches(&self, command: &str) -> bool {
         command
             .split_whitespace()

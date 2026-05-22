@@ -1,9 +1,13 @@
 use crate::compress::generic::GenericCompressor;
-use crate::compress::Compressor;
+use crate::compress::{Compressor, Specificity};
 
 pub struct NpmCompressor;
 
 impl Compressor for NpmCompressor {
+    fn specificity(&self) -> Specificity {
+        Specificity::PackageManager
+    }
+
     fn matches(&self, command: &str) -> bool {
         command
             .split_whitespace()
