@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -151,6 +152,30 @@ fn cross_platform_echo_command() -> &'static str {
     "echo hello"
 }
 
+fn shell_quote_path(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+}
+
+fn wait_for_file(path: &Path) {
+    let started = Instant::now();
+    while !path.exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "timed out waiting for {}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn hold_until_release_command(marker: &Path, release: &Path) -> String {
+    format!(
+        "printf ready > {}; while [ ! -f {} ]; do sleep 0.05; done",
+        shell_quote_path(marker),
+        shell_quote_path(release)
+    )
+}
+
 #[test]
 fn background_bash_spawns_and_completes_cross_platform() {
     let mut aft = AftProcess::spawn();
@@ -177,12 +202,13 @@ fn background_bash_spawns_and_completes_cross_platform() {
 #[test]
 fn background_spawn_status_running_and_completion() {
     let mut aft = AftProcess::spawn();
-    let _dir = configure_background(&mut aft);
+    let dir = configure_background(&mut aft);
+    let marker = dir.path().join("spawn-running.alive");
+    let release = dir.path().join("spawn-running.release");
+    let command = hold_until_release_command(&marker, &release);
 
-    // Keep this longer than the 500ms watchdog interval. `sleep 0.5`
-    // ended right on the watchdog tick boundary and could complete before
-    // this status check observed the intended Running state under load.
-    let task_id = spawn_bg(&mut aft, "spawn-running", "sleep 1");
+    let task_id = spawn_bg(&mut aft, "spawn-running", &command);
+    wait_for_file(&marker);
     let running = status(&mut aft, &task_id);
     assert_eq!(
         running["success"], true,
@@ -190,6 +216,7 @@ fn background_spawn_status_running_and_completion() {
     );
     assert_eq!(running["status"], "running");
 
+    std::fs::write(&release, "").expect("release background task");
     let completed = wait_for_status(&mut aft, &task_id, "completed");
     assert_eq!(completed["exit_code"], 0);
     assert!(completed["duration_ms"].is_u64());

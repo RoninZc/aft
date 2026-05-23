@@ -1655,7 +1655,7 @@ fn setup_watcher_fixture() -> (tempfile::TempDir, String) {
 /// load. A single sleep(500ms) + ping is flaky on busy runners (~20%
 /// failure rate observed locally on macOS).
 ///
-/// This helper sends ping → query in a loop until the predicate matches
+/// This helper optionally mutates, then sends ping → query in a loop until the predicate matches
 /// or the timeout elapses. The ping forces `drain_watcher_events` to run,
 /// which flushes any pending invalidations into the callgraph.
 ///
@@ -1666,23 +1666,29 @@ fn setup_watcher_fixture() -> (tempfile::TempDir, String) {
 ///   - `description`: human-readable for the panic message on timeout
 ///
 /// Returns the final response if the predicate matched. Panics on timeout.
-fn poll_watcher_update<F>(
+fn poll_watcher_update_after_mutation<M, F>(
     aft: &mut AftProcess,
     query: &str,
+    mut mutate: M,
     predicate: F,
     description: &str,
 ) -> serde_json::Value
 where
+    M: FnMut(u32),
     F: Fn(&serde_json::Value) -> bool,
 {
-    // 15s upper bound — generous enough to absorb FSEvents coalescing latency
+    // 10s upper bound — generous enough to absorb FSEvents coalescing latency
     // under cargo-test parallelism, short enough that a real regression still fails fast.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let poll_interval = std::time::Duration::from_millis(100);
     let mut last_response = serde_json::Value::Null;
     let mut ping_id = 1000;
+    let mut attempt = 0;
 
     while std::time::Instant::now() < deadline {
+        attempt += 1;
+        mutate(attempt);
+
         // Drain pending watcher events into the callgraph.
         ping_id += 1;
         aft.send(&format!(r#"{{"id":"ping-{}","command":"ping"}}"#, ping_id));
@@ -1696,7 +1702,7 @@ where
     }
 
     panic!(
-        "watcher update did not propagate within 15s: {}\nlast response: {:?}",
+        "watcher update did not propagate within 10s: {}\nlast response: {:?}",
         description, last_response
     );
 }
@@ -1735,34 +1741,34 @@ fn callgraph_watcher_add_caller() {
     let initial_total = resp["total_callers"].as_u64().unwrap();
     assert!(initial_total > 0, "validate should have initial callers");
 
-    // Give the watcher thread a short window to finish subscribing before
-    // creating the file; under full-suite parallelism the configure response
-    // can arrive before the OS watcher is fully armed.
-    std::thread::sleep(std::time::Duration::from_millis(250));
-
-    // Write a new file that calls validate
     let new_file = std::path::Path::new(&root).join("extra_caller.ts");
-    std::fs::write(
-        &new_file,
-        r#"import { validate } from './helpers';
 
-export function extraCheck(input: string): boolean {
-    return validate(input);
-}
-"#,
-    )
-    .expect("write new caller file");
-
-    // Poll until the watcher delivers the file-create event and the
-    // callgraph picks up the new caller. See poll_watcher_update for why
-    // a single sleep + ping is too flaky on busy runners.
+    // Poll until the watcher delivers the file-create/modify event and the
+    // callgraph picks up the new caller. The mutation is repeated inside the
+    // poll loop so a configure response that arrives before the watcher is
+    // armed cannot lose the only create event.
     let query = format!(
         r#"{{"id":"4","command":"callers","file":"{}/helpers.ts","symbol":"validate","depth":1}}"#,
         root
     );
-    let resp = poll_watcher_update(
+    let resp = poll_watcher_update_after_mutation(
         &mut aft,
         &query,
+        |attempt| {
+            std::fs::write(
+                &new_file,
+                format!(
+                    r#"import {{ validate }} from './helpers';
+
+export function extraCheck(input: string): boolean {{
+    // mutation attempt {attempt}
+    return validate(input);
+}}
+"#
+                ),
+            )
+            .expect("write new caller file");
+        },
         |r| {
             r["success"] == true
                 && r["total_callers"].as_u64().unwrap_or(0) > initial_total
@@ -1828,28 +1834,31 @@ fn callgraph_watcher_remove_caller() {
         "validate should initially be called from utils.ts"
     );
 
-    // Rewrite utils.ts to remove the validate() call
     let utils_path = std::path::Path::new(&root).join("utils.ts");
-    std::fs::write(
-        &utils_path,
-        r#"export function processData(input: string): string {
-    // validate call removed
-    return input.toUpperCase();
-}
-"#,
-    )
-    .expect("rewrite utils.ts");
 
     // Poll until the watcher delivers the file-modify event and the
-    // callgraph drops the removed caller. See poll_watcher_update for why
-    // a single sleep + ping is too flaky on busy runners.
+    // callgraph drops the removed caller. The rewrite is repeated inside the
+    // poll loop so a watcher-arming race cannot lose the only modify event.
     let query = format!(
         r#"{{"id":"4","command":"callers","file":"{}/helpers.ts","symbol":"validate","depth":1}}"#,
         root
     );
-    poll_watcher_update(
+    poll_watcher_update_after_mutation(
         &mut aft,
         &query,
+        |attempt| {
+            std::fs::write(
+                &utils_path,
+                format!(
+                    r#"export function processData(input: string): string {{
+    // validate call removed on attempt {attempt}
+    return input.toUpperCase();
+}}
+"#
+                ),
+            )
+            .expect("rewrite utils.ts");
+        },
         |r| {
             if r["success"] != true {
                 return false;

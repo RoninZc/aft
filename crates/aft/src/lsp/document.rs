@@ -160,12 +160,21 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::Write;
-    use std::thread;
     use std::time::Duration;
 
     fn write_file(path: &Path, content: &str) {
         let mut f = fs::File::create(path).expect("create test file");
         f.write_all(content.as_bytes()).expect("write content");
+    }
+
+    fn advance_mtime(path: &Path, duration: Duration) {
+        let modified = fs::metadata(path)
+            .expect("stat test file")
+            .modified()
+            .expect("test file mtime");
+        let advanced = modified.checked_add(duration).expect("advanced mtime");
+        filetime::set_file_mtime(path, filetime::FileTime::from_system_time(advanced))
+            .expect("set advanced mtime");
     }
 
     #[test]
@@ -217,10 +226,8 @@ mod tests {
         store.open(path.clone());
         assert!(!store.is_stale_on_disk(&path));
 
-        // Sleep enough that mtime resolution can differ (most filesystems
-        // give us at least millisecond precision, but be safe).
-        thread::sleep(Duration::from_millis(20));
         write_file(&path, "hello world!");
+        advance_mtime(&path, Duration::from_secs(2));
 
         assert!(store.is_stale_on_disk(&path));
     }
@@ -249,8 +256,8 @@ mod tests {
         let mut store = DocumentStore::new();
         store.open(path.clone());
 
-        thread::sleep(Duration::from_millis(20));
         write_file(&path, "updated");
+        advance_mtime(&path, Duration::from_secs(2));
         assert!(store.is_stale_on_disk(&path));
 
         // After bump_version, the entry should pick up the new mtime/size

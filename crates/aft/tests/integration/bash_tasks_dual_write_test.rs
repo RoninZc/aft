@@ -1,6 +1,7 @@
 #![cfg(unix)]
 
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -60,6 +61,30 @@ fn spawn_task(registry: &BgTaskRegistry, storage: &Path, project: &Path, command
             Some(project.to_path_buf()),
         )
         .expect("spawn background task")
+}
+
+fn shell_quote_path(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+}
+
+fn wait_for_file(path: &Path) {
+    let started = Instant::now();
+    while !path.exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "timed out waiting for {}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn hold_until_release_command(marker: &Path, release: &Path) -> String {
+    format!(
+        "printf ready > {}; while [ ! -f {} ]; do sleep 0.05; done",
+        shell_quote_path(marker),
+        shell_quote_path(release)
+    )
 }
 
 fn wait_for_status(
@@ -195,11 +220,16 @@ fn bash_tasks_dual_write_status_transitions_update_db_row() {
     let storage = tempfile::tempdir().unwrap();
     let (registry, conn) = registry_with_db(storage.path(), Harness::Opencode);
 
-    let task_id = spawn_task(&registry, storage.path(), project.path(), "sleep 0.2");
+    let marker = project.path().join("dual-write-running.alive");
+    let release = project.path().join("dual-write-running.release");
+    let command = hold_until_release_command(&marker, &release);
+    let task_id = spawn_task(&registry, storage.path(), project.path(), &command);
+    wait_for_file(&marker);
     let running = wait_for_status(&conn, "opencode", SESSION, &task_id, "running");
     assert!(running.pid.is_some());
     assert!(running.completed_at.is_none());
 
+    fs::write(&release, "").expect("release background task");
     let completed = wait_for_status(&conn, "opencode", SESSION, &task_id, "completed");
     assert_eq!(completed.exit_code, Some(0));
     assert!(completed.pid.is_none());

@@ -1,5 +1,4 @@
 use std::fs;
-use std::thread;
 use std::time::Duration;
 
 use aft::parser::{FileParser, SymbolCache};
@@ -18,6 +17,19 @@ fn write_source(project: &tempfile::TempDir, body: &str) -> std::path::PathBuf {
     fs::create_dir_all(path.parent().expect("source parent")).expect("create source dir");
     fs::write(&path, body).expect("write source file");
     path
+}
+
+fn rewrite_with_advanced_mtime(path: &std::path::Path, body: &str) {
+    let modified = fs::metadata(path)
+        .expect("stat source")
+        .modified()
+        .expect("source mtime");
+    let advanced = modified
+        .checked_add(Duration::from_secs(2))
+        .expect("advanced mtime");
+    fs::write(path, body).expect("rewrite source");
+    filetime::set_file_mtime(path, filetime::FileTime::from_system_time(advanced))
+        .expect("set advanced source mtime");
 }
 
 fn build_symbol_cache(project: &tempfile::TempDir, source: &std::path::Path) -> SymbolCache {
@@ -77,8 +89,7 @@ fn mtime_invalidation_drops_changed_entry() {
 
     symbol_cache_disk::write_to_disk(&cache, storage.path(), "mtime-project")
         .expect("write symbol cache");
-    thread::sleep(Duration::from_millis(20));
-    fs::write(&source, "pub fn mtime_change() -> bool { true }\n").expect("rewrite source");
+    rewrite_with_advanced_mtime(&source, "pub fn mtime_change() -> bool { true }\n");
 
     let mut fresh = SymbolCache::new();
     let loaded = fresh.load_from_disk(storage.path(), "mtime-project", project.path());

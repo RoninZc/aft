@@ -13,7 +13,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::thread;
 use std::time::Duration;
 
 use aft::semantic_index::SemanticIndex;
@@ -88,12 +87,19 @@ fn build_two_file_index(project_root: &Path) -> (SemanticIndex, PathBuf, PathBuf
     (index, file_a, file_b)
 }
 
-/// Touch a file's mtime by overwriting its contents. Sleep first to ensure
-/// filesystem mtime resolution sees a different timestamp on platforms with
-/// 1-second mtime granularity.
+/// Touch a file's mtime by overwriting its contents, then explicitly advance
+/// it so platforms with 1-second mtime granularity observe a changed timestamp.
 fn rewrite_with_new_mtime(path: &Path, new_contents: &str) {
-    thread::sleep(Duration::from_millis(1100));
+    let modified = fs::metadata(path)
+        .expect("stat file before rewrite")
+        .modified()
+        .expect("file mtime before rewrite");
+    let advanced = modified
+        .checked_add(Duration::from_secs(2))
+        .expect("advanced mtime");
     fs::write(path, new_contents).expect("rewrite");
+    filetime::set_file_mtime(path, filetime::FileTime::from_system_time(advanced))
+        .expect("set advanced mtime");
 }
 
 static SHARED_LOG_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
