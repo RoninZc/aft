@@ -219,6 +219,31 @@ fn main() -> io::Result<()> {
         match message {
             ServerMessage::Request { id, method, params } => match method.as_str() {
                 "initialize" => {
+                    if std::env::var("AFT_FAKE_LSP_INIT_CRASH_MODULE_NOT_FOUND")
+                        .ok()
+                        .as_deref()
+                        == Some("1")
+                    {
+                        eprintln!(
+                            "Error: Cannot find module '/missing/typescript-language-server/lib/cli.mjs'"
+                        );
+                        eprintln!("code: 'MODULE_NOT_FOUND'");
+                        std::process::exit(1);
+                    }
+                    if let Some(bytes) = std::env::var("AFT_FAKE_LSP_INIT_STDERR_BYTES")
+                        .ok()
+                        .and_then(|value| value.parse::<usize>().ok())
+                    {
+                        let mut stderr = io::stderr().lock();
+                        for index in 0..bytes / 80 {
+                            let _ = writeln!(
+                                stderr,
+                                "stderr-fill-line-{index:06}: MODULE_NOT_FOUND cannot find module padding"
+                            );
+                        }
+                        let _ = stderr.flush();
+                        std::process::exit(1);
+                    }
                     // Capability variants controlled by env vars so tests
                     // can exercise different code paths:
                     //   AFT_FAKE_LSP_PULL=1                → declare diagnosticProvider
@@ -381,6 +406,18 @@ fn main() -> io::Result<()> {
                         std::env::var("AFT_FAKE_LSP_PULL_UNCHANGED").ok().as_deref() == Some("1");
                     let force_error =
                         std::env::var("AFT_FAKE_LSP_PULL_ERROR").ok().as_deref() == Some("1");
+
+                    if std::env::var("AFT_FAKE_LSP_PULL_EXIT_MODULE_NOT_FOUND")
+                        .ok()
+                        .as_deref()
+                        == Some("1")
+                    {
+                        eprintln!(
+                            "Error: Cannot find module '/missing/typescript-language-server/lib/cli.mjs'"
+                        );
+                        eprintln!("code: 'MODULE_NOT_FOUND'");
+                        std::process::exit(1);
+                    }
 
                     if force_error {
                         write_json_message(

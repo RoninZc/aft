@@ -167,26 +167,29 @@ describe("auto-update-checker/cache", () => {
 
   describe("runNpmInstallSafe", () => {
     test("returns true for successful npm install", async () => {
-      const proc = new EventEmitter();
+      const proc = new EventEmitter() as childProcess.ChildProcess;
+      proc.stdout = new EventEmitter() as childProcess.ChildProcess["stdout"];
+      proc.stderr = new EventEmitter() as childProcess.ChildProcess["stderr"];
       const spawnMock = spyOn(childProcess, "spawn").mockImplementation(() => {
         setTimeout(() => proc.emit("exit", 0), 0);
-        return proc as childProcess.ChildProcess;
+        return proc;
       });
       const { runNpmInstallSafe } = await freshCacheImport();
 
-      expect(await runNpmInstallSafe("/tmp/opencode", { timeoutMs: 1000 })).toBe(true);
+      expect(await runNpmInstallSafe("/tmp/opencode", { timeoutMs: 1000 })).toEqual({
+        ok: true,
+        stderrTail: undefined,
+      });
       // Critical contract: we spawn `npm install` with the quiet flags so
       // background auto-updates don't dump audit/funding output into the
       // plugin log. Earlier versions called `bun install`, which generated
       // a parallel bun.lock that drifted from OpenCode's package-lock.json.
       expect(spawnMock).toHaveBeenCalledWith(
-        "npm",
-        ["install", "--no-audit", "--no-fund", "--no-progress"],
+        process.platform === "win32" ? "npm.cmd" : "npm",
+        ["install", "--no-audit", "--no-fund", "--no-progress", "--ignore-scripts"],
         {
           cwd: "/tmp/opencode",
-          // Lane G F6: stdio:"ignore" so spawned npm doesn't keep file
-          // descriptors open and prevent the plugin host from exiting.
-          stdio: "ignore",
+          stdio: ["ignore", "pipe", "pipe"],
         },
       );
 
@@ -195,13 +198,41 @@ describe("auto-update-checker/cache", () => {
 
     test("kills install process and returns false on timeout", async () => {
       const proc = new EventEmitter() as childProcess.ChildProcess;
+      proc.stdout = new EventEmitter() as childProcess.ChildProcess["stdout"];
+      proc.stderr = new EventEmitter() as childProcess.ChildProcess["stderr"];
       const killMock = mock(() => true);
       proc.kill = killMock;
       const spawnMock = spyOn(childProcess, "spawn").mockReturnValue(proc);
       const { runNpmInstallSafe } = await freshCacheImport();
 
-      expect(await runNpmInstallSafe("/tmp/opencode", { timeoutMs: 1 })).toBe(false);
+      expect(await runNpmInstallSafe("/tmp/opencode", { timeoutMs: 1 })).toEqual({
+        ok: false,
+        reason: "timeout",
+        stderrTail: undefined,
+      });
       expect(killMock).toHaveBeenCalled();
+
+      spawnMock.mockRestore();
+    });
+
+    test("captures stderr tail on npm install failure", async () => {
+      const proc = new EventEmitter() as childProcess.ChildProcess;
+      proc.stdout = new EventEmitter() as childProcess.ChildProcess["stdout"];
+      proc.stderr = new EventEmitter() as childProcess.ChildProcess["stderr"];
+      const spawnMock = spyOn(childProcess, "spawn").mockImplementation(() => {
+        setTimeout(() => {
+          proc.stderr?.emit("data", Buffer.from("MODULE_NOT_FOUND\n"));
+          proc.emit("exit", 1);
+        }, 0);
+        return proc;
+      });
+      const { runNpmInstallSafe } = await freshCacheImport();
+
+      expect(await runNpmInstallSafe("/tmp/opencode", { timeoutMs: 1000 })).toEqual({
+        ok: false,
+        reason: "npm install exited with code 1",
+        stderrTail: "MODULE_NOT_FOUND\n",
+      });
 
       spawnMock.mockRestore();
     });

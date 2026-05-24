@@ -89,6 +89,8 @@ describe("Lane G plugin orchestration regressions", () => {
     writeFileSync(join(pkgDir, "marker.txt"), "original");
 
     const proc = new EventEmitter() as childProcess.ChildProcess;
+    proc.stdout = new EventEmitter() as childProcess.ChildProcess["stdout"];
+    proc.stderr = new EventEmitter() as childProcess.ChildProcess["stderr"];
     const spawnMock = spyOn(childProcess, "spawn").mockImplementation(() => {
       setTimeout(() => proc.emit("exit", 1), 0);
       return proc;
@@ -100,11 +102,11 @@ describe("Lane G plugin orchestration regressions", () => {
       expect(
         preparePackageUpdate("0.2.0", "@cortexkit/aft-opencode", join(pkgDir, "package.json")),
       ).toBe(root);
-      expect(await runNpmInstallSafe(root, { timeoutMs: 1000 })).toBe(false);
+      expect(await runNpmInstallSafe(root, { timeoutMs: 1000 })).toMatchObject({ ok: false });
       expect(readFileSync(join(root, "package.json"), "utf-8")).toContain("0.1.0");
       expect(readFileSync(join(root, "package-lock.json"), "utf-8")).toContain("0.1.0");
       expect(readFileSync(join(pkgDir, "marker.txt"), "utf-8")).toBe("original");
-      expect(spawnMock.mock.calls[0][2]).toMatchObject({ stdio: "ignore" });
+      expect(spawnMock.mock.calls[0][2]).toMatchObject({ stdio: ["ignore", "pipe", "pipe"] });
     } finally {
       spawnMock.mockRestore();
       rmSync(root, { recursive: true, force: true });

@@ -290,8 +290,8 @@ async function runBackgroundUpdateCheck(
     return;
   }
 
-  const installSuccess = await runNpmInstallSafe(installDir, { signal: options.signal });
-  if (installSuccess) {
+  const installResult = await runNpmInstallSafe(installDir, { signal: options.signal });
+  if (installResult.ok) {
     showToast(
       ctx,
       "AFT Updated!",
@@ -310,7 +310,13 @@ async function runBackgroundUpdateCheck(
     "error",
     8000,
   );
-  warn("[auto-update-checker] npm install failed; update not installed");
+  const failureDetail = installResult.reason ? `: ${installResult.reason}` : "";
+  const stderrDetail = installResult.stderrTail
+    ? `\nstderr tail:\n${installResult.stderrTail}`
+    : "";
+  warn(
+    `[auto-update-checker] npm install failed; update not installed${failureDetail}${stderrDetail}`,
+  );
 }
 
 export function getAutoUpdateInstallDir(): string {

@@ -605,7 +605,7 @@ fn pty_write_too_large() {
 }
 
 #[test]
-fn pty_validation_no_background() {
+fn pty_true_implies_background() {
     use aft::config::Config;
     use aft::context::AppContext;
     use aft::parser::TreeSitterProvider;
@@ -622,19 +622,19 @@ fn pty_validation_no_background() {
         },
     );
     let req: RawRequest = serde_json::from_value(json!({
-        "id": "pty-no-bg",
+        "id": "pty-implies-bg",
         "command": "bash",
-        "params": { "command": "cat", "pty": true }
+        "params": { "command": "printf hi", "pty": true }
     }))
     .unwrap();
 
     let response = aft::commands::bash::handle(&req, &ctx);
-    assert!(!response.success);
-    assert_eq!(response.data["code"], "invalid_request");
-    assert!(response.data["message"]
-        .as_str()
-        .unwrap()
-        .contains("background"));
+    assert!(
+        response.success,
+        "pty:true should imply background: {response:?}"
+    );
+    assert_eq!(response.data["status"], "running");
+    assert_eq!(response.data["mode"], "pty");
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::io::{self, BufReader, BufWriter};
+use std::io::{self, BufReader, BufWriter, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
@@ -23,6 +23,8 @@ use crate::lsp::{transport, LspError};
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const STDERR_TAIL_BYTES: usize = 16 * 1024;
+const STDERR_TAIL_LINES: usize = 64;
 
 type PendingMap = HashMap<RequestId, Sender<JsonRpcResponse>>;
 type WatchedFileRegistrations = Arc<Mutex<HashSet<String>>>;
@@ -118,6 +120,7 @@ pub struct LspClient {
     /// so the signal handler can SIGKILL them on SIGTERM/SIGINT before
     /// aft exits. Cloned via `Arc` — multiple clients share the same set.
     child_registry: LspChildRegistry,
+    stderr_tail: Arc<Mutex<String>>,
 }
 
 impl LspClient {
@@ -141,9 +144,9 @@ impl LspClient {
             .current_dir(&root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            // Use null() instead of piped() to prevent deadlock when the server
-            // writes more than ~64KB to stderr (piped buffer fills, server blocks)
-            .stderr(Stdio::null());
+            // Drain stderr on a background thread so failed shims/crashes have
+            // actionable diagnostics without risking pipe-buffer deadlock.
+            .stderr(Stdio::piped());
         for (key, value) in env {
             command.env(key, value);
         }
@@ -189,6 +192,12 @@ impl LspClient {
             .stdin
             .take()
             .ok_or_else(|| io::Error::other("language server missing stdin pipe"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| io::Error::other("language server missing stderr pipe"))?;
+        let stderr_tail = Arc::new(Mutex::new(String::new()));
+        spawn_stderr_drain_thread(stderr, Arc::clone(&stderr_tail));
 
         let writer = Arc::new(Mutex::new(BufWriter::new(stdin)));
         let pending = Arc::new(Mutex::new(PendingMap::new()));
@@ -296,6 +305,7 @@ impl LspClient {
             supports_watched_files: false,
             watched_file_registrations,
             child_registry,
+            stderr_tail,
         })
     }
 
@@ -602,6 +612,21 @@ impl LspClient {
         }
     }
 
+    pub fn stderr_tail(&self) -> String {
+        self.stderr_tail
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn child_exited(&mut self) -> bool {
+        self.child.try_wait().ok().flatten().is_some()
+    }
+
+    pub fn child_exit_status(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.try_wait().ok().flatten()
+    }
+
     pub fn state(&self) -> ServerState {
         self.state
     }
@@ -653,6 +678,58 @@ impl Drop for LspClient {
         // try to SIGKILL a PID that's already been reaped.
         self.child_registry.untrack(self.child_pid);
         kill_lsp_child_group(&mut self.child);
+    }
+}
+
+fn spawn_stderr_drain_thread(
+    mut stderr: std::process::ChildStderr,
+    stderr_tail: Arc<Mutex<String>>,
+) {
+    thread::spawn(move || {
+        let mut buf = [0_u8; 4096];
+        loop {
+            match stderr.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let chunk = String::from_utf8_lossy(&buf[..n]);
+                    if let Ok(mut tail) = stderr_tail.lock() {
+                        append_stderr_tail(&mut tail, &chunk);
+                    } else {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+fn append_stderr_tail(tail: &mut String, chunk: &str) {
+    tail.push_str(chunk);
+    trim_stderr_tail_bytes(tail);
+    trim_stderr_tail_lines(tail);
+}
+
+fn trim_stderr_tail_bytes(tail: &mut String) {
+    if tail.len() <= STDERR_TAIL_BYTES {
+        return;
+    }
+    let mut start = tail.len() - STDERR_TAIL_BYTES;
+    while start < tail.len() && !tail.is_char_boundary(start) {
+        start += 1;
+    }
+    tail.drain(..start);
+}
+
+fn trim_stderr_tail_lines(tail: &mut String) {
+    let line_count = tail.lines().count();
+    if line_count <= STDERR_TAIL_LINES {
+        return;
+    }
+    let excess = line_count - STDERR_TAIL_LINES;
+    let split_at = tail.match_indices('\n').nth(excess - 1).map(|(i, _)| i + 1);
+    if let Some(at) = split_at {
+        tail.drain(..at);
     }
 }
 

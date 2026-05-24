@@ -3,7 +3,7 @@ import { fetchUrlToTempFile, formatZoomText } from "@cortexkit/aft-bridge";
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import type { PluginContext } from "../types.js";
-import { callBridge } from "./_shared.js";
+import { callBridge, optionalInt } from "./_shared.js";
 
 const z = tool.schema;
 
@@ -124,10 +124,9 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
           .array(z.string())
           .optional()
           .describe("Array of symbol names or heading texts for a single batched call"),
-        contextLines: z
-          .number()
-          .optional()
-          .describe("Lines of context before/after the symbol (default: 3)"),
+        contextLines: optionalInt(1, Number.MAX_SAFE_INTEGER).describe(
+          "Lines of context before/after the symbol (default: 3)",
+        ),
       },
       execute: async (args, context): Promise<string> => {
         const hasFilePath = typeof args.filePath === "string" && args.filePath.length > 0;

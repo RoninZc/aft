@@ -18,7 +18,7 @@ const checkerMocks = {
 const cacheMocks = {
   preparePackageUpdate: mock(() => "/tmp/opencode"),
   resolveInstallContext: mock(() => ({ installDir: "/tmp/opencode" })),
-  runNpmInstallSafe: mock(async () => true),
+  runNpmInstallSafe: mock(async () => ({ ok: true })),
 };
 
 mock.module("../../logger.js", () => ({
@@ -82,7 +82,7 @@ describe("auto-update-checker/index", () => {
     cacheMocks.resolveInstallContext.mockReset();
     cacheMocks.resolveInstallContext.mockImplementation(() => ({ installDir: "/tmp/opencode" }));
     cacheMocks.runNpmInstallSafe.mockReset();
-    cacheMocks.runNpmInstallSafe.mockImplementation(async () => true);
+    cacheMocks.runNpmInstallSafe.mockImplementation(async () => ({ ok: true }));
   });
 
   afterEach(() => {
@@ -347,7 +347,11 @@ describe("auto-update-checker/index", () => {
     }));
     checkerMocks.getCachedVersion.mockImplementation(() => "0.17.1");
     checkerMocks.getLatestVersion.mockImplementation(async () => "0.17.2");
-    cacheMocks.runNpmInstallSafe.mockImplementation(async () => false);
+    cacheMocks.runNpmInstallSafe.mockImplementation(async () => ({
+      ok: false,
+      reason: "npm install exited with code 1",
+      stderrTail: "MODULE_NOT_FOUND\n",
+    }));
     const { createAutoUpdateCheckerHook } = await freshIndexImport();
     const { ctx, showToast } = createCtx();
 

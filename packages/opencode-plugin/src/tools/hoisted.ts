@@ -17,7 +17,7 @@ import { resolveBashConfig } from "../config.js";
 import { storeToolMetadata } from "../metadata-store.js";
 import { applyUpdateChunks, parsePatch } from "../patch-parser.js";
 import type { PluginContext } from "../types.js";
-import { callBridge } from "./_shared.js";
+import { callBridge, optionalInt } from "./_shared.js";
 import { createBashKillTool, createBashStatusTool, createBashTool } from "./bash.js";
 import { createBashWatchTool } from "./bash_watch.js";
 import { createBashWriteTool } from "./bash_write.js";
@@ -378,15 +378,18 @@ export function createReadTool(ctx: PluginContext): ToolDefinition {
       filePath: z
         .string()
         .describe("Path to file or directory (absolute or relative to project root)"),
-      startLine: z.number().optional().describe("1-based line to start reading from"),
-      endLine: z.number().optional().describe("1-based line to stop reading at (inclusive)"),
-      limit: z.number().optional().describe("Max lines to return (default: 2000)"),
-      offset: z
-        .number()
-        .optional()
-        .describe(
-          "1-based line number to start reading from (use with limit). Ignored if startLine is provided",
-        ),
+      startLine: optionalInt(1, Number.MAX_SAFE_INTEGER).describe(
+        "1-based line to start reading from",
+      ),
+      endLine: optionalInt(1, Number.MAX_SAFE_INTEGER).describe(
+        "1-based line to stop reading at (inclusive)",
+      ),
+      limit: optionalInt(1, Number.MAX_SAFE_INTEGER).describe(
+        "Max lines to return (default: 2000)",
+      ),
+      offset: optionalInt(1, Number.MAX_SAFE_INTEGER).describe(
+        "1-based line number to start reading from (use with limit). Ignored if startLine is provided",
+      ),
     },
     execute: async (args, context): Promise<string> => {
       const file = args.filePath as string;
@@ -747,10 +750,9 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
         .optional()
         .describe("Text to replace with (omit or set to empty string to delete the matched text)"),
       replaceAll: z.boolean().optional().describe("Replace all occurrences"),
-      occurrence: z
-        .number()
-        .optional()
-        .describe("0-indexed occurrence to replace when multiple matches exist"),
+      occurrence: optionalInt(0, Number.MAX_SAFE_INTEGER).describe(
+        "0-indexed occurrence to replace when multiple matches exist",
+      ),
       symbol: z.string().optional().describe("Named symbol to replace (function, class, type)"),
       content: z.string().optional().describe("New content for symbol replace or file write"),
       appendContent: z

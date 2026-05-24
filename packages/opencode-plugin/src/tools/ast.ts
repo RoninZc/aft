@@ -10,7 +10,7 @@ const z = tool.schema;
 
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import type { PluginContext } from "../types.js";
-import { callBridge } from "./_shared.js";
+import { callBridge, optionalInt } from "./_shared.js";
 import {
   askEditPermission,
   assertExternalDirectoryPermission,
@@ -75,10 +75,9 @@ export function astTools(ctx: PluginContext): Record<string, ToolDefinition> {
       lang: z.enum(SUPPORTED_LANGS).describe("Target language"),
       paths: z.array(z.string()).optional().describe("Paths to search (default: ['.'])"),
       globs: z.array(z.string()).optional().describe("Include/exclude globs (prefix ! to exclude)"),
-      contextLines: z
-        .number()
-        .optional()
-        .describe("Number of context lines to show around each match"),
+      contextLines: optionalInt(1, Number.MAX_SAFE_INTEGER).describe(
+        "Number of context lines to show around each match",
+      ),
     },
     execute: async (args, context): Promise<string> => {
       const externalDenied = await checkAstPathsPermission(context, args.paths);

@@ -1,7 +1,9 @@
 import type { ToolDefinition } from "@opencode-ai/plugin";
-import { z } from "zod";
+import { tool } from "@opencode-ai/plugin";
 import type { PluginContext } from "../types.js";
-import { callBridge } from "./_shared.js";
+import { callBridge, optionalInt } from "./_shared.js";
+
+const z = tool.schema;
 
 type ToolArg = ToolDefinition["args"][string];
 
@@ -36,7 +38,7 @@ export function semanticTools(ctx: PluginContext): Record<string, ToolDefinition
             "Concept or capability to find, phrased as a programmer would describe the code. Examples: 'fuzzy match with whitespace tolerance', 'undo backup before edit', 'retry failed network request'.",
           ),
       ),
-      topK: arg(z.number().optional().describe("Number of results (default: 10, max: 100)")),
+      topK: arg(optionalInt(1, 100).describe("Number of results (default: 10, max: 100)")),
     },
     execute: async (args, context): Promise<string> => {
       const response = await callBridge(ctx, context, "semantic_search", {

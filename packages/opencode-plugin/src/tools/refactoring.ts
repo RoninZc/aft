@@ -2,7 +2,7 @@ import type { ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { queryLspHints } from "../lsp.js";
 import type { PluginContext } from "../types.js";
-import { callBridge } from "./_shared.js";
+import { callBridge, optionalInt } from "./_shared.js";
 import {
   askEditPermission,
   assertExternalDirectoryPermission,
@@ -55,18 +55,18 @@ export function refactoringTools(ctx: PluginContext): Record<string, ToolDefinit
           ),
         // extract
         name: z.string().optional().describe("New function name — required for 'extract' op"),
-        startLine: z.number().optional().describe("1-based start line — required for 'extract' op"),
+        startLine: optionalInt(1, Number.MAX_SAFE_INTEGER).describe(
+          "1-based start line — required for 'extract' op",
+        ),
         // endLine is inclusive from the agent's perspective; the execute function adds +1
         // because the Rust backend expects exclusive end. This is intentional — do not document.
-        endLine: z
-          .number()
-          .optional()
-          .describe("1-based end line (inclusive) — required for 'extract' op"),
+        endLine: optionalInt(1, Number.MAX_SAFE_INTEGER).describe(
+          "1-based end line (inclusive) — required for 'extract' op",
+        ),
         // inline
-        callSiteLine: z
-          .number()
-          .optional()
-          .describe("1-based call site line — required for 'inline' op"),
+        callSiteLine: optionalInt(1, Number.MAX_SAFE_INTEGER).describe(
+          "1-based call site line — required for 'inline' op",
+        ),
       },
       execute: async (args, context): Promise<string> => {
         const op = args.op as string;

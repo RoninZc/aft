@@ -242,17 +242,34 @@ export function preparePackageUpdate(
  * mediocre network, short enough that a stuck install doesn't pin the plugin
  * process. Caller can override.
  */
+const STDERR_TAIL_BYTES = 16 * 1024;
+
 export async function runNpmInstallSafe(
   installDir: string,
   options: { timeoutMs?: number; signal?: AbortSignal } = {},
-): Promise<boolean> {
+): Promise<{ ok: boolean; reason?: string; stderrTail?: string }> {
   let timeout: ReturnType<typeof setTimeout> | null = null;
+  let stderrTail = "";
 
   try {
-    if (options.signal?.aborted) return false;
-    const proc = spawn("npm", ["install", "--no-audit", "--no-fund", "--no-progress"], {
-      cwd: installDir,
-      stdio: "ignore",
+    if (options.signal?.aborted) return { ok: false, reason: "aborted" };
+    const npmBin = process.platform === "win32" ? "npm.cmd" : "npm";
+    const proc = spawn(
+      npmBin,
+      ["install", "--no-audit", "--no-fund", "--no-progress", "--ignore-scripts"],
+      {
+        cwd: installDir,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    proc.stderr?.on("data", (chunk: Buffer) => {
+      stderrTail += chunk.toString("utf8");
+      if (stderrTail.length > STDERR_TAIL_BYTES) {
+        stderrTail = stderrTail.slice(-STDERR_TAIL_BYTES);
+      }
+    });
+    proc.stdout?.on("data", () => {
+      // Drain stdout too; stderr carries the actionable failure detail.
     });
 
     const abortProcess = () => {
@@ -264,9 +281,15 @@ export async function runNpmInstallSafe(
     };
     options.signal?.addEventListener("abort", abortProcess, { once: true });
 
-    const exitPromise = new Promise<boolean>((resolveExit) => {
-      proc.on("error", () => resolveExit(false));
-      proc.on("exit", (code) => resolveExit(code === 0));
+    const exitPromise = new Promise<{ ok: boolean; reason?: string }>((resolveExit) => {
+      proc.on("error", (err) => resolveExit({ ok: false, reason: `spawn error: ${String(err)}` }));
+      proc.on("exit", (code) =>
+        resolveExit(
+          code === 0
+            ? { ok: true }
+            : { ok: false, reason: `npm install exited with code ${code ?? "signal/unknown"}` },
+        ),
+      );
     });
     const timeoutPromise = new Promise<"timeout">((resolveTimeout) => {
       timeout = setTimeout(() => resolveTimeout("timeout"), options.timeoutMs ?? 60_000);
@@ -281,25 +304,36 @@ export async function runNpmInstallSafe(
         pendingSnapshots.delete(installDir);
         restoreAutoUpdateSnapshot(snapshot);
       }
-      return false;
+      const reason = options.signal?.aborted ? "aborted" : "timeout";
+      warnNpmInstallFailure(reason, stderrTail);
+      return { ok: false, reason, stderrTail: stderrTail || undefined };
     }
     const snapshot = pendingSnapshots.get(installDir);
     pendingSnapshots.delete(installDir);
-    if (!result && snapshot) {
+    if (!result.ok && snapshot) {
       restoreAutoUpdateSnapshot(snapshot);
     } else if (snapshot) {
       rmSync(snapshot.tempDir, { recursive: true, force: true });
     }
-    return result;
+    if (!result.ok) {
+      warnNpmInstallFailure(result.reason ?? "npm install failed", stderrTail);
+    }
+    return { ...result, stderrTail: stderrTail || undefined };
   } catch (err) {
     const snapshot = pendingSnapshots.get(installDir);
     if (snapshot) {
       pendingSnapshots.delete(installDir);
       restoreAutoUpdateSnapshot(snapshot);
     }
-    warn(`[auto-update-checker] npm install error: ${String(err)}`);
-    return false;
+    const reason = `exception: ${String(err)}`;
+    warnNpmInstallFailure(reason, stderrTail);
+    return { ok: false, reason, stderrTail: stderrTail || undefined };
   } finally {
     if (timeout) clearTimeout(timeout);
   }
+}
+
+function warnNpmInstallFailure(reason: string, stderrTail?: string): void {
+  const tail = stderrTail ? `\nstderr tail:\n${stderrTail}` : "";
+  warn(`[auto-update-checker] npm install failed (${reason})${tail}`);
 }

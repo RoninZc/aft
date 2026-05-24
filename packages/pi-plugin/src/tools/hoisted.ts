@@ -29,7 +29,7 @@ import {
 import { type Component, Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import type { PluginContext } from "../types.js";
-import { bridgeFor, callBridge, textResult } from "./_shared.js";
+import { bridgeFor, callBridge, coerceOptionalInt, optionalInt, textResult } from "./_shared.js";
 import { formatDiffForPi } from "./diff-format.js";
 
 /**
@@ -66,10 +66,8 @@ async function assertExternalDirectoryPermission(
 
 const ReadParams = Type.Object({
   path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
-  offset: Type.Optional(
-    Type.Number({ description: "Line number to start reading from (1-indexed)" }),
-  ),
-  limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
+  offset: optionalInt(1, Number.MAX_SAFE_INTEGER),
+  limit: optionalInt(1, Number.MAX_SAFE_INTEGER),
 });
 
 const WriteParams = Type.Object({
@@ -86,9 +84,7 @@ const EditParams = Type.Object({
   ),
   newString: Type.Optional(Type.String({ description: "Replacement text (omit to delete match)" })),
   replaceAll: Type.Optional(Type.Boolean({ description: "Replace every occurrence" })),
-  occurrence: Type.Optional(
-    Type.Number({ description: "0-indexed occurrence when multiple matches exist" }),
-  ),
+  occurrence: optionalInt(0, Number.MAX_SAFE_INTEGER),
   appendContent: Type.Optional(
     Type.String({
       description:
@@ -104,9 +100,7 @@ const GrepParams = Type.Object({
     Type.String({ description: "Glob filter for included files (e.g. '*.ts,*.tsx')" }),
   ),
   caseSensitive: Type.Optional(Type.Boolean({ description: "Case-sensitive matching" })),
-  contextLines: Type.Optional(
-    Type.Number({ description: "Lines of context before/after each match" }),
-  ),
+  contextLines: optionalInt(1, Number.MAX_SAFE_INTEGER),
 });
 
 export interface ToolSurfaceFlags {
@@ -178,14 +172,16 @@ export function registerHoistedTools(
         extCtx,
       ) {
         const bridge = bridgeFor(ctx, extCtx.cwd);
+        const offset = coerceOptionalInt(params.offset, "offset", 1, Number.MAX_SAFE_INTEGER);
+        const limit = coerceOptionalInt(params.limit, "limit", 1, Number.MAX_SAFE_INTEGER);
         const req: Record<string, unknown> = { file: params.path };
-        if (params.offset !== undefined) {
-          req.start_line = params.offset;
-          if (params.limit !== undefined) {
-            req.end_line = params.offset + params.limit - 1;
+        if (offset !== undefined) {
+          req.start_line = offset;
+          if (limit !== undefined) {
+            req.end_line = offset + limit - 1;
           }
-        } else if (params.limit !== undefined) {
-          req.end_line = params.limit;
+        } else if (limit !== undefined) {
+          req.end_line = limit;
         }
         const response = await callBridge(bridge, "read", req, extCtx);
         if (Array.isArray(response.entries)) {
@@ -201,7 +197,7 @@ export function registerHoistedTools(
         // existed. This restores Case A (hint when agent didn't choose)
         // while avoiding the patronizing hint when the agent already
         // chose a range (Case B → no footer).
-        const agentSpecifiedRange = params.offset !== undefined || params.limit !== undefined;
+        const agentSpecifiedRange = offset !== undefined || limit !== undefined;
         const footer = formatReadFooter(agentSpecifiedRange, response);
         if (footer) text += footer;
         return textResult(text);
@@ -298,7 +294,13 @@ export function registerHoistedTools(
           include_diff: true,
         };
         if (params.replaceAll === true) req.replace_all = true;
-        if (params.occurrence !== undefined) req.occurrence = params.occurrence;
+        const occurrence = coerceOptionalInt(
+          params.occurrence,
+          "occurrence",
+          0,
+          Number.MAX_SAFE_INTEGER,
+        );
+        if (occurrence !== undefined) req.occurrence = occurrence;
 
         const response = await callBridge(bridge, "edit_match", req, extCtx);
         return buildMutationResult(params.filePath, response);
@@ -336,7 +338,13 @@ export function registerHoistedTools(
         }
         if (params.include) req.include = splitIncludeGlobs(params.include);
         if (params.caseSensitive !== undefined) req.case_sensitive = params.caseSensitive;
-        if (params.contextLines !== undefined) req.context_lines = params.contextLines;
+        const contextLines = coerceOptionalInt(
+          params.contextLines,
+          "contextLines",
+          1,
+          Number.MAX_SAFE_INTEGER,
+        );
+        if (contextLines !== undefined) req.context_lines = contextLines;
 
         const response = await callBridge(bridge, "grep", req, extCtx);
         const text = (response.text as string | undefined) ?? "";

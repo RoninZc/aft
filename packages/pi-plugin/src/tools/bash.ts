@@ -24,7 +24,14 @@ import {
   renderScreen,
 } from "../shared/pty-cache.js";
 import type { PluginContext } from "../types.js";
-import { bridgeFor, callBridge, resolveSessionId, textResult } from "./_shared.js";
+import {
+  bridgeFor,
+  callBridge,
+  coerceOptionalInt,
+  optionalInt,
+  resolveSessionId,
+  textResult,
+} from "./_shared.js";
 
 // Foreground polling wait-window: how long the plugin blocks the agent before
 // promoting the task to background and returning. INTENTIONALLY decoupled
@@ -62,13 +69,7 @@ const BashParams = Type.Object({
   command: Type.String({
     description: "Shell command to execute. Supports pipes, redirections, and shell syntax.",
   }),
-  timeout: Type.Optional(
-    Type.Integer({
-      minimum: 1,
-      description:
-        "Hard kill cap in milliseconds (positive integer). When omitted, the task can run up to 30 minutes. Foreground bash returns inline if the command finishes within ~5s; otherwise it's automatically promoted to background and a completion reminder is delivered when the task actually finishes.",
-    }),
-  ),
+  timeout: optionalInt(1, Number.MAX_SAFE_INTEGER),
   workdir: Type.Optional(
     Type.String({
       description:
@@ -99,22 +100,8 @@ const BashParams = Type.Object({
         'Spawn the command in a real PTY for interactive programs. Implies background: true automatically. Inspect with bash_status({ task_id, output_mode: "screen" }) and send input with bash_write.',
     }),
   ),
-  ptyRows: Type.Optional(
-    Type.Integer({
-      minimum: 1,
-      maximum: 60,
-      description:
-        "PTY terminal height in rows — ignored when pty is false. Defaults to 24 when pty: true. Minimum 1, maximum 60.",
-    }),
-  ),
-  ptyCols: Type.Optional(
-    Type.Integer({
-      minimum: 1,
-      maximum: 140,
-      description:
-        "PTY terminal width in columns — ignored when pty is false. Defaults to 80 when pty: true. Minimum 1, maximum 140.",
-    }),
-  ),
+  ptyRows: optionalInt(1, 60),
+  ptyCols: optionalInt(1, 140),
 });
 
 const BashTaskParams = Type.Object({
@@ -141,7 +128,7 @@ const BashWatchParams = Type.Object({
   }),
   pattern: Type.Optional(Type.Union([Type.String(), Type.Object({ regex: Type.String() })])),
   background: Type.Optional(Type.Boolean()),
-  timeout_ms: Type.Optional(Type.Integer({ minimum: 1 })),
+  timeout_ms: optionalInt(1, MAX_BASH_STATUS_WAIT_TIMEOUT_MS),
   once: Type.Optional(Type.Boolean()),
 });
 
@@ -278,6 +265,9 @@ export function registerBashTool(pi: ExtensionAPI, ctx: PluginContext): void {
       // a retry loop. pty: true silently implies background: true (Rust
       // bash.rs handles the auto-promote); we mirror that here so the
       // Pi-side spawn payload also reflects the auto-promotion.
+      const timeout = coerceOptionalInt(params.timeout, "timeout", 1, Number.MAX_SAFE_INTEGER);
+      const ptyRows = coerceOptionalInt(params.ptyRows, "ptyRows", 1, 60);
+      const ptyCols = coerceOptionalInt(params.ptyCols, "ptyCols", 1, 140);
       const effectiveBackground = params.background === true || params.pty === true;
 
       // Build spawn context for potential hook modification
@@ -304,7 +294,7 @@ export function registerBashTool(pi: ExtensionAPI, ctx: PluginContext): void {
         "bash",
         {
           command: spawnContext.command,
-          timeout: params.timeout,
+          timeout,
           workdir: spawnContext.cwd ?? params.workdir,
           env: spawnContext.env,
           description: params.description,
@@ -312,8 +302,8 @@ export function registerBashTool(pi: ExtensionAPI, ctx: PluginContext): void {
           notify_on_completion: effectiveBackground,
           compressed: params.compressed,
           pty: params.pty,
-          pty_rows: params.ptyRows,
-          pty_cols: params.ptyCols,
+          pty_rows: ptyRows,
+          pty_cols: ptyCols,
         },
         extCtx,
         {
@@ -362,8 +352,8 @@ export function registerBashTool(pi: ExtensionAPI, ctx: PluginContext): void {
         // Schema validation guarantees params.timeout is a positive integer
         // or undefined, so this Math.min is always well-defined.
         const waitTimeoutMs =
-          params.timeout !== undefined
-            ? Math.min(params.timeout, FOREGROUND_WAIT_WINDOW_MS)
+          timeout !== undefined
+            ? Math.min(timeout, FOREGROUND_WAIT_WINDOW_MS)
             : FOREGROUND_WAIT_WINDOW_MS;
         const startedAt = Date.now();
         while (true) {
@@ -557,7 +547,8 @@ export function createBashWatchTool(ctx: PluginContext) {
         waitFor,
         true,
         Math.min(
-          params.timeout_ms ?? DEFAULT_BASH_STATUS_WAIT_TIMEOUT_MS,
+          coerceOptionalInt(params.timeout_ms, "timeout_ms", 1, MAX_BASH_STATUS_WAIT_TIMEOUT_MS) ??
+            DEFAULT_BASH_STATUS_WAIT_TIMEOUT_MS,
           MAX_BASH_STATUS_WAIT_TIMEOUT_MS,
         ),
       );

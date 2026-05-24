@@ -1,7 +1,7 @@
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import type { PluginContext } from "../types.js";
-import { callBridge } from "./_shared.js";
+import { callBridge, optionalInt } from "./_shared.js";
 
 const z = tool.schema;
 
@@ -32,12 +32,9 @@ export function navigationTools(ctx: PluginContext): Record<string, ToolDefiniti
             "Path to the source file containing the symbol (absolute or relative to project root)",
           ),
         symbol: z.string().describe("Name of the symbol to analyze"),
-        depth: z
-          .number()
-          .optional()
-          .describe(
-            "Max traversal depth (default: call_tree=5, callers=1, trace_to=10, impact=5, trace_data=5)",
-          ),
+        depth: optionalInt(1, Number.MAX_SAFE_INTEGER).describe(
+          "Max traversal depth (default: call_tree=5, callers=1, trace_to=10, impact=5, trace_data=5)",
+        ),
         expression: z
           .string()
           .optional()

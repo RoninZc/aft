@@ -13,7 +13,7 @@ import {
 } from "../shared/pty-cache.js";
 import { resolveIsSubagent } from "../shared/subagent-detect.js";
 import type { PluginContext } from "../types.js";
-import { callBridge, projectRootFor } from "./_shared.js";
+import { callBridge, optionalInt, projectRootFor } from "./_shared.js";
 import { runAsk } from "./permissions.js";
 
 const z = tool.schema;
@@ -95,14 +95,9 @@ export function createBashTool(ctx: PluginContext): ToolDefinition {
         .describe(
           "Shell command to execute through AFT's unified bash schema. Supports normal shell syntax, pipes, redirection, and command rewriting to dedicated AFT tools when available.",
         ),
-      timeout: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .describe(
-          "Hard kill cap in milliseconds (positive integer). When omitted, the task can run up to 30 minutes. Foreground bash returns inline if the command finishes within ~5s; otherwise it's automatically promoted to background and a completion reminder is delivered when the task actually finishes.",
-        ),
+      timeout: optionalInt(1, Number.MAX_SAFE_INTEGER).describe(
+        "Hard kill cap in milliseconds (positive integer). When omitted, the task can run up to 30 minutes. Foreground bash returns inline if the command finishes within ~5s; otherwise it's automatically promoted to background and a completion reminder is delivered when the task actually finishes.",
+      ),
       workdir: z
         .string()
         .optional()
@@ -133,24 +128,12 @@ export function createBashTool(ctx: PluginContext): ToolDefinition {
         .describe(
           'When true, spawn the command in a real PTY for interactive programs (python/node/bash REPLs, vim). Implies background: true automatically. Unavailable in subagent sessions. Inspect with bash_status({ taskId, outputMode: "screen" }) and drive interactively with bash_write — its input accepts either a string OR an array like [ "iHello", { key: "esc" }, ":wq", { key: "enter" } ] for atomic text+key sequences.',
         ),
-      ptyRows: z
-        .number()
-        .int()
-        .min(1)
-        .max(60)
-        .optional()
-        .describe(
-          "PTY terminal height in rows — ignored when pty is false. Defaults to 24 when pty: true. Minimum 1, maximum 60.",
-        ),
-      ptyCols: z
-        .number()
-        .int()
-        .min(1)
-        .max(140)
-        .optional()
-        .describe(
-          "PTY terminal width in columns — ignored when pty is false. Defaults to 80 when pty: true. Minimum 1, maximum 140.",
-        ),
+      ptyRows: optionalInt(1, 60).describe(
+        "PTY terminal height in rows — ignored when pty is false. Defaults to 24 when pty: true. Minimum 1, maximum 60.",
+      ),
+      ptyCols: optionalInt(1, 140).describe(
+        "PTY terminal width in columns — ignored when pty is false. Defaults to 80 when pty: true. Minimum 1, maximum 140.",
+      ),
     },
     execute: async (args, context) => {
       const bashCfg = resolveBashConfig(ctx.config);

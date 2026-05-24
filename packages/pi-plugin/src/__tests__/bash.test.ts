@@ -252,7 +252,7 @@ describe("bash tool adapter", () => {
     const bashTool = tools.get("bash")!;
     const result = (await bashTool.execute(
       "test-call",
-      { command: "sleep 2", timeout: 0 },
+      { command: "sleep 2", timeout: 1 },
       undefined,
       undefined,
       { cwd: "/test" },
@@ -261,6 +261,7 @@ describe("bash tool adapter", () => {
     expect(result.content[0].text).toContain("promoted to background: task-promote");
     expect(calls.map((call) => (call as [string])[0])).toEqual([
       "bash",
+      "bash_status",
       "bash_status",
       "bash_promote",
     ]);

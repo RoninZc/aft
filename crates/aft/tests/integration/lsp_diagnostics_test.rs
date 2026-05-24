@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::thread;
@@ -10,7 +11,8 @@ use aft::commands::transaction::handle_transaction;
 use aft::commands::write::handle_write;
 use aft::config::{Config, UserServerDef};
 use aft::context::AppContext;
-use aft::lsp::client::LspEvent;
+use aft::lsp::child_registry::LspChildRegistry;
+use aft::lsp::client::{LspClient, LspEvent};
 use aft::lsp::diagnostics::DiagnosticSeverity;
 use aft::lsp::manager::LspManager;
 use aft::lsp::registry::{is_config_file_path, is_config_file_path_with_custom, ServerKind};
@@ -816,6 +818,130 @@ fn test_diagnostics_clear_on_empty_array() {
     manager.notify_file_closed(file).expect("close file");
     wait_for_publish(&mut manager);
     assert!(manager.get_diagnostics_for_file(file).is_empty());
+}
+
+#[test]
+fn test_lsp_post_initialize_exit_reports_stderr_and_caches_failure() {
+    let (_temp_dir, _root, files) = rust_workspace_with_files(&["main.rs", "lib.rs"]);
+    let first = &files[0];
+    let second = &files[1];
+    let ctx = app_context_with_fake_lsp();
+    ctx.lsp().set_extra_env("AFT_FAKE_LSP_PULL", "1");
+    ctx.lsp()
+        .set_extra_env("AFT_FAKE_LSP_PULL_EXIT_MODULE_NOT_FOUND", "1");
+
+    let first_req: RawRequest = serde_json::from_value(serde_json::json!({
+        "id": "diag-post-init-exit-1",
+        "command": "lsp_diagnostics",
+        "file": first.display().to_string(),
+        "wait_ms": 0
+    }))
+    .expect("request parses");
+    let first_response = serde_json::to_value(handle_lsp_diagnostics(&first_req, &ctx))
+        .expect("response serializes");
+    let first_status = first_response["lsp_servers_used"][0]["status"]
+        .as_str()
+        .expect("status string");
+    assert!(
+        first_status.contains("MODULE_NOT_FOUND"),
+        "missing stderr in first status: {first_status}"
+    );
+    assert!(
+        first_status.contains("npm install -g <package> --force"),
+        "missing reinstall hint in first status: {first_status}"
+    );
+    assert_eq!(ctx.lsp().active_client_count(), 0);
+
+    let second_req: RawRequest = serde_json::from_value(serde_json::json!({
+        "id": "diag-post-init-exit-2",
+        "command": "lsp_diagnostics",
+        "file": second.display().to_string(),
+        "wait_ms": 0
+    }))
+    .expect("request parses");
+    let second_response = serde_json::to_value(handle_lsp_diagnostics(&second_req, &ctx))
+        .expect("response serializes");
+    let second_status = second_response["lsp_servers_used"][0]["status"]
+        .as_str()
+        .expect("status string");
+    assert!(
+        second_status.starts_with("spawn_failed"),
+        "expected cached spawn failure, got: {second_status}"
+    );
+    assert!(
+        second_status.contains("MODULE_NOT_FOUND")
+            && second_status.contains("npm install -g <package> --force"),
+        "cached status lost stderr/hint: {second_status}"
+    );
+    assert_eq!(ctx.lsp().active_client_count(), 0);
+}
+
+#[test]
+fn test_lsp_initialize_crash_reports_stderr_and_hint() {
+    let (_temp_dir, _root, files) = rust_workspace_with_files(&["main.rs"]);
+    let file = &files[0];
+    let ctx = app_context_with_fake_lsp();
+    ctx.lsp()
+        .set_extra_env("AFT_FAKE_LSP_INIT_CRASH_MODULE_NOT_FOUND", "1");
+
+    let req: RawRequest = serde_json::from_value(serde_json::json!({
+        "id": "diag-init-crash",
+        "command": "lsp_diagnostics",
+        "file": file.display().to_string(),
+        "wait_ms": 0
+    }))
+    .expect("request parses");
+    let response =
+        serde_json::to_value(handle_lsp_diagnostics(&req, &ctx)).expect("response serializes");
+    let status = response["lsp_servers_used"][0]["status"]
+        .as_str()
+        .expect("status string");
+    assert!(
+        status.contains("server crashed during initialize"),
+        "status: {status}"
+    );
+    assert!(status.contains("MODULE_NOT_FOUND"), "status: {status}");
+    assert!(
+        status.contains("npm install -g <package> --force"),
+        "missing reinstall hint: {status}"
+    );
+}
+
+#[test]
+fn test_lsp_stderr_tail_is_bounded_and_drained() {
+    let (_temp_dir, root, _files) = rust_workspace_with_files(&["main.rs"]);
+    let (event_tx, _event_rx) = crossbeam_channel::unbounded();
+    let mut env = HashMap::new();
+    env.insert(
+        "AFT_FAKE_LSP_INIT_STDERR_BYTES".to_string(),
+        "200000".to_string(),
+    );
+    let mut client = LspClient::spawn(
+        ServerKind::Rust,
+        root.clone(),
+        &fake_server_path(),
+        &[],
+        &env,
+        event_tx,
+        LspChildRegistry::new(),
+    )
+    .expect("spawn fake lsp");
+
+    let _ = client
+        .initialize(&root, None)
+        .expect_err("initialize should fail");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while client.stderr_tail().is_empty() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let tail = client.stderr_tail();
+    assert!(!tail.is_empty(), "stderr tail should be captured");
+    assert!(
+        tail.len() <= 16 * 1024,
+        "stderr tail exceeded byte cap: {}",
+        tail.len()
+    );
+    assert!(tail.contains("MODULE_NOT_FOUND"), "tail: {tail}");
 }
 
 #[test]

@@ -14,7 +14,7 @@ import { resolveBashConfig } from "../config.js";
 import { getOrCreatePtyTerminal, readPtyBytes } from "../shared/pty-cache.js";
 import { resolveIsSubagent } from "../shared/subagent-detect.js";
 import type { PluginContext } from "../types.js";
-import { callBridge, projectRootFor } from "./_shared.js";
+import { callBridge, optionalInt, projectRootFor } from "./_shared.js";
 
 const z = tool.schema;
 const BASH_WAIT_POLL_INTERVAL_MS = 100;
@@ -51,12 +51,9 @@ export function createBashWatchTool(ctx: PluginContext): ToolDefinition {
         .describe(
           "When true, register an async watch and return immediately. Defaults to false (sync wait).",
         ),
-      timeoutMs: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .describe("Sync-only timeout in milliseconds. Default 30000, max 300000."),
+      timeoutMs: optionalInt(1, MAX_BASH_STATUS_WAIT_TIMEOUT_MS).describe(
+        "Sync-only timeout in milliseconds. Default 30000, max 300000.",
+      ),
       once: z
         .boolean()
         .optional()

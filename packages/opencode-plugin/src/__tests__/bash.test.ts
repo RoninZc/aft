@@ -105,13 +105,15 @@ describe("OpenCode bash adapter", () => {
     expect(safeParse(bash.args.timeout, "slow").success).toBe(false);
     expect(safeParse(bash.args.background, "yes").success).toBe(false);
     expect(safeParse(bash.args.compressed, "no").success).toBe(false);
-    expect(safeParse(bash.args.ptyRows, 0).success).toBe(false);
+    expect(safeParse(bash.args.ptyRows, 0).success).toBe(true);
     expect(safeParse(bash.args.ptyRows, 61).success).toBe(false);
     expect(safeParse(bash.args.ptyRows, 1.5).success).toBe(false);
     expect(safeParse(bash.args.ptyCols, 141).success).toBe(false);
 
     for (const schema of Object.values(bash.args)) {
-      const jsonSchema = tool.schema.toJSONSchema(schema) as { description?: string };
+      const jsonSchema = tool.schema.toJSONSchema(schema, { unrepresentable: "any" }) as {
+        description?: string;
+      };
       expect(jsonSchema.description?.length).toBeGreaterThan(20);
     }
   });

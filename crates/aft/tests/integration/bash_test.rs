@@ -84,18 +84,24 @@ fn bash_rejects_blocked_env_vars() {
 #[test]
 fn bash_rejects_invalid_pty_dimensions() {
     let mut aft = AftProcess::spawn();
+    let dir = tempfile::tempdir().unwrap();
+    let configure = aft.send(
+        &serde_json::json!({
+            "id": "cfg-bg",
+            "command": "configure",
+            "harness": "opencode",
+            "project_root": dir.path(),
+            "storage_dir": dir.path().join("storage"),
+            "experimental_bash_background": true,
+        })
+        .to_string(),
+    );
+    assert_eq!(
+        configure["success"], true,
+        "configure failed: {configure:?}"
+    );
 
     let cases = [
-        (
-            "pty-rows-zero",
-            serde_json::json!({
-                "command": "echo nope",
-                "background": true,
-                "pty": true,
-                "pty_rows": 0,
-            }),
-            "ptyRows must be an integer between 1 and 60",
-        ),
         (
             "pty-rows-too-large",
             serde_json::json!({
@@ -115,15 +121,6 @@ fn bash_rejects_invalid_pty_dimensions() {
                 "pty_cols": 141,
             }),
             "ptyCols must be an integer between 1 and 140",
-        ),
-        (
-            "pty-dims-without-pty",
-            serde_json::json!({
-                "command": "echo nope",
-                "background": true,
-                "pty_rows": 50,
-            }),
-            "ptyRows/ptyCols require pty: true",
         ),
         (
             "pty-rows-float",

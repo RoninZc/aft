@@ -4,8 +4,30 @@
 
 import type { BinaryBridge, BridgeRequestOptions } from "@cortexkit/aft-bridge";
 import type { AgentToolResult, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { ingestBgCompletions } from "../bg-notifications.js";
 import type { PluginContext } from "../types.js";
+
+export const optionalInt = (_min: number, _max: number) =>
+  Type.Optional(Type.Any({ description: "(integer)" }));
+
+export function coerceOptionalInt(
+  v: unknown,
+  paramName: string,
+  min: number,
+  max: number,
+): number | undefined {
+  if (v === undefined || v === null || v === "") return undefined;
+  if (typeof v === "number" && (v === 0 || !Number.isFinite(v))) return undefined;
+  const n = typeof v === "string" ? Number(v) : v;
+  if (typeof n !== "number" || !Number.isInteger(n)) {
+    throw new Error(`${paramName} must be an integer between ${min} and ${max}`);
+  }
+  if (n < min || n > max) {
+    throw new Error(`${paramName} must be between ${min} and ${max}`);
+  }
+  return n;
+}
 
 /**
  * Per-command timeout overrides (milliseconds).

@@ -7,7 +7,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { AgentToolResult, ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import type { PluginContext } from "../types.js";
-import { bridgeFor, callBridge, textResult } from "./_shared.js";
+import { bridgeFor, callBridge, coerceOptionalInt, optionalInt, textResult } from "./_shared.js";
 import {
   accentPath,
   asNumber,
@@ -29,9 +29,9 @@ const RefactorParams = Type.Object({
   destination: Type.Optional(Type.String({ description: "Target file (for move)" })),
   scope: Type.Optional(Type.String({ description: "Disambiguation scope for move op" })),
   name: Type.Optional(Type.String({ description: "New function name (for extract)" })),
-  startLine: Type.Optional(Type.Number({ description: "1-based start line (for extract)" })),
-  endLine: Type.Optional(Type.Number({ description: "1-based end line, inclusive (for extract)" })),
-  callSiteLine: Type.Optional(Type.Number({ description: "1-based call site line (for inline)" })),
+  startLine: optionalInt(1, Number.MAX_SAFE_INTEGER),
+  endLine: optionalInt(1, Number.MAX_SAFE_INTEGER),
+  callSiteLine: optionalInt(1, Number.MAX_SAFE_INTEGER),
 });
 
 /** Exported for renderer unit tests. */
@@ -129,12 +129,25 @@ export function registerRefactorTool(pi: ExtensionAPI, ctx: PluginContext): void
       if (params.destination !== undefined) req.destination = params.destination;
       if (params.scope !== undefined) req.scope = params.scope;
       if (params.name !== undefined) req.name = params.name;
-      if (params.startLine !== undefined) req.start_line = params.startLine;
+      const startLine = coerceOptionalInt(
+        params.startLine,
+        "startLine",
+        1,
+        Number.MAX_SAFE_INTEGER,
+      );
+      const endLine = coerceOptionalInt(params.endLine, "endLine", 1, Number.MAX_SAFE_INTEGER);
+      const callSiteLine = coerceOptionalInt(
+        params.callSiteLine,
+        "callSiteLine",
+        1,
+        Number.MAX_SAFE_INTEGER,
+      );
+      if (startLine !== undefined) req.start_line = startLine;
       // Agent uses inclusive end_line; Rust extract_function expects exclusive.
-      if (params.endLine !== undefined) {
-        req.end_line = params.op === "extract" ? params.endLine + 1 : params.endLine;
+      if (endLine !== undefined) {
+        req.end_line = params.op === "extract" ? endLine + 1 : endLine;
       }
-      if (params.callSiteLine !== undefined) req.call_site_line = params.callSiteLine;
+      if (callSiteLine !== undefined) req.call_site_line = callSiteLine;
       const response = await callBridge(bridge, commandMap[params.op], req, extCtx);
       return textResult(JSON.stringify(response, null, 2));
     },

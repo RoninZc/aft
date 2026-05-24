@@ -19,6 +19,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { BinaryBridge, BridgeRequestOptions } from "@cortexkit/aft-bridge";
+import { tool } from "@opencode-ai/plugin";
 import { ingestBgCompletions } from "../bg-notifications.js";
 import {
   getSessionDirectory,
@@ -26,6 +27,40 @@ import {
   warmSessionDirectory,
 } from "../shared/session-directory.js";
 import type { PluginContext } from "../types.js";
+
+const z = tool.schema;
+
+// biome-ignore lint/suspicious/noExplicitAny: tool.schema's transform/optional combo widens to an internal type that can't be portably named.
+export const optionalInt = (min: number, max: number): any =>
+  z
+    .any()
+    .transform((v, ctx) => {
+      if (
+        v === undefined ||
+        v === null ||
+        v === "" ||
+        (typeof v === "number" && (v === 0 || !Number.isFinite(v)))
+      ) {
+        return undefined;
+      }
+      const n = typeof v === "string" ? Number(v) : v;
+      if (typeof n !== "number" || !Number.isInteger(n)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `must be an integer between ${min} and ${max}`,
+        });
+        return z.NEVER;
+      }
+      if (n < min || n > max) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `must be between ${min} and ${max}`,
+        });
+        return z.NEVER;
+      }
+      return n;
+    })
+    .optional();
 
 /**
  * Per-command timeout overrides (milliseconds).

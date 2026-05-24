@@ -7,7 +7,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { AgentToolResult, ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import type { PluginContext } from "../types.js";
-import { bridgeFor, callBridge, textResult } from "./_shared.js";
+import { bridgeFor, callBridge, coerceOptionalInt, optionalInt, textResult } from "./_shared.js";
 import {
   accentPath,
   asBoolean,
@@ -30,7 +30,7 @@ function navigateParamsSchema() {
     }),
     filePath: Type.String({ description: "Source file containing the symbol" }),
     symbol: Type.String({ description: "Name of the symbol to analyze" }),
-    depth: Type.Optional(Type.Number({ description: "Max traversal depth" })),
+    depth: optionalInt(1, Number.MAX_SAFE_INTEGER),
     expression: Type.Optional(
       Type.String({ description: "Expression to track (required for trace_data)" }),
     ),
@@ -209,7 +209,8 @@ export function registerNavigateTool(pi: ExtensionAPI, ctx: PluginContext): void
         file: params.filePath,
         symbol: params.symbol,
       };
-      if (params.depth !== undefined) req.depth = params.depth;
+      const depth = coerceOptionalInt(params.depth, "depth", 1, Number.MAX_SAFE_INTEGER);
+      if (depth !== undefined) req.depth = depth;
       if (params.expression !== undefined) req.expression = params.expression;
       const response = await callBridge(bridge, params.op, req, extCtx);
       return textResult(JSON.stringify(response, null, 2));

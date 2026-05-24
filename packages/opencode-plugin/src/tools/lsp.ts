@@ -1,7 +1,7 @@
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import type { PluginContext } from "../types.js";
-import { callBridge } from "./_shared.js";
+import { callBridge, optionalInt } from "./_shared.js";
 
 const z = tool.schema;
 /**
@@ -55,12 +55,9 @@ export function lspTools(ctx: PluginContext): Record<string, ToolDefinition> {
         .enum(["error", "warning", "information", "hint", "all"])
         .optional()
         .describe("Filter by severity (default: 'all')."),
-      waitMs: z
-        .number()
-        .optional()
-        .describe(
-          "Wait up to N ms (max 10000, default 0) for push diagnostics to arrive. Only matters for servers that don't support LSP 3.17 pull (bash-language-server, yaml-language-server). Use after an edit to let the server re-analyze.",
-        ),
+      waitMs: optionalInt(1, 10_000).describe(
+        "Wait up to N ms (max 10000, default 0) for push diagnostics to arrive. Only matters for servers that don't support LSP 3.17 pull (bash-language-server, yaml-language-server). Use after an edit to let the server re-analyze.",
+      ),
     },
     execute: async (args, context): Promise<string> => {
       const filePath = args.filePath || undefined; // treat empty string as absent

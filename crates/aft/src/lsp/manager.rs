@@ -1046,9 +1046,19 @@ impl LspManager {
 
             let outcome = match self.send_pull_request(&key, params) {
                 Ok(report) => self.ingest_document_report(&key, &canonical_path, report),
-                Err(err) => PullFileOutcome::RequestFailed {
-                    reason: err.to_string(),
-                },
+                Err(err) => {
+                    if let Some(result) =
+                        self.cache_post_initialize_exit(&key, key.kind.id_str(), &err)
+                    {
+                        PullFileOutcome::RequestFailed {
+                            reason: server_attempt_result_reason(&result),
+                        }
+                    } else {
+                        PullFileOutcome::RequestFailed {
+                            reason: err.to_string(),
+                        }
+                    }
+                }
             };
 
             results.push(PullFileResult {
@@ -1117,7 +1127,16 @@ impl LspManager {
                     supports_workspace: true,
                 });
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                if let Some(result) =
+                    self.cache_post_initialize_exit(server_key, server_key.kind.id_str(), &err)
+                {
+                    return Err(LspError::ServerNotReady(server_attempt_result_reason(
+                        &result,
+                    )));
+                }
+                return Err(err);
+            }
         };
 
         // Extract the items list. Partial responses are not a complete
@@ -1161,6 +1180,38 @@ impl LspManager {
             cancelled: false,
             supports_workspace: true,
         })
+    }
+
+    fn cache_post_initialize_exit(
+        &mut self,
+        key: &ServerKey,
+        binary: &str,
+        err: &LspError,
+    ) -> Option<ServerAttemptResult> {
+        let (status, stderr_tail) = {
+            let client = self.clients.get_mut(key)?;
+            let mut status = client.child_exit_status();
+            for _ in 0..10 {
+                if status.is_some() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                status = client.child_exit_status();
+            }
+            let status = status?;
+            wait_for_stderr_tail(client);
+            (status, client.stderr_tail())
+        };
+        let reason = format_post_initialize_exit_reason(binary, status, &stderr_tail, err);
+        let result = ServerAttemptResult::SpawnFailed {
+            binary: binary.to_string(),
+            reason,
+        };
+        self.clients.remove(key);
+        self.documents.remove(key);
+        self.diagnostics.clear_for_server(key);
+        self.failed_spawns.insert(key.clone(), result.clone());
+        Some(result)
     }
 
     /// Issue the per-file diagnostic request and return the report.
@@ -1344,7 +1395,16 @@ impl LspManager {
             self.event_tx.clone(),
             self.child_registry.clone(),
         )?;
-        client.initialize(root, def.initialization_options.clone())?;
+        if let Err(err) = client.initialize(root, def.initialization_options.clone()) {
+            wait_for_stderr_tail(&mut client);
+            let stderr_tail = client.stderr_tail();
+            let reason = if client.child_exited() || !stderr_tail.is_empty() {
+                format_initialize_failure_reason(&def.binary, &stderr_tail, &err)
+            } else {
+                format!("server failed during initialize: {err}")
+            };
+            return Err(LspError::ServerNotReady(reason));
+        }
         Ok(client)
     }
 
@@ -1406,6 +1466,89 @@ impl LspManager {
 impl Default for LspManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn wait_for_stderr_tail(client: &mut LspClient) {
+    for _ in 0..10 {
+        if !client.stderr_tail().is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn server_attempt_result_reason(result: &ServerAttemptResult) -> String {
+    match result {
+        ServerAttemptResult::SpawnFailed { binary, reason } => {
+            format!("spawn_failed: {binary} ({reason})")
+        }
+        ServerAttemptResult::BinaryNotInstalled { binary } => {
+            format!("binary_not_installed: {binary}")
+        }
+        ServerAttemptResult::NoRootMarker { looked_for } => {
+            format!("no_root_marker (looked for: {})", looked_for.join(", "))
+        }
+        ServerAttemptResult::Ok { .. } => "ok".to_string(),
+    }
+}
+
+fn indent_tail(stderr_tail: &str, max_lines: usize) -> String {
+    stderr_tail
+        .lines()
+        .rev()
+        .take(max_lines)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_initialize_failure_reason(binary: &str, stderr_tail: &str, err: &LspError) -> String {
+    let mut reason = String::from("server crashed during initialize");
+    if !stderr_tail.is_empty() {
+        reason.push_str(". stderr tail (last 8 lines):\n");
+        reason.push_str(&indent_tail(stderr_tail, 8));
+    } else {
+        reason.push_str(&format!(": {err}"));
+    }
+    reason.push_str("\n\n");
+    reason.push_str(&failure_hint(binary, stderr_tail));
+    reason
+}
+
+fn format_post_initialize_exit_reason(
+    binary: &str,
+    status: std::process::ExitStatus,
+    stderr_tail: &str,
+    err: &LspError,
+) -> String {
+    let code = status
+        .code()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "signal/unknown".to_string());
+    let mut reason = format!("server exited after initialize (code {code}): {err}");
+    if !stderr_tail.is_empty() {
+        reason.push_str(". stderr tail (last 8 lines):\n");
+        reason.push_str(&indent_tail(stderr_tail, 8));
+        reason.push_str("\n\n");
+        reason.push_str(&failure_hint(binary, stderr_tail));
+    }
+    reason
+}
+
+fn failure_hint(binary: &str, stderr_tail: &str) -> String {
+    if stderr_tail.contains("MODULE_NOT_FOUND") || stderr_tail.contains("Cannot find module") {
+        format!(
+            "Hint: '{binary}' shim resolves to a missing module file. Common cause: package-manager \
+             store corruption from filesystem migration, backup-restore, or store pruning. \
+             Fix: reinstall (e.g. `npm install -g <package> --force` or pnpm/yarn equivalent), \
+             or remove `lsp.servers.<id>` from your config to fall back to AFT's built-in (if available)."
+        )
+    } else {
+        format!("Hint: see stderr above for '{binary}' failure details.")
     }
 }
 
