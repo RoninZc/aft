@@ -42,6 +42,7 @@ export interface PatternMatchEntry {
   match_offset: number;
   context: string;
   once: boolean;
+  reason?: "pattern_match" | "task_exit";
 }
 
 export interface BgLongRunningReminder {
@@ -601,6 +602,9 @@ export function formatPatternMatchReminder(matches: readonly PatternMatchEntry[]
   const bullets = matches
     .map((match) => {
       const context = (match.context || match.match_text).replace(/\n/g, "\n      > ");
+      if (match.reason === "task_exit") {
+        return `- task ${match.task_id} exited:\n      > ${context}`;
+      }
       return `- task ${match.task_id} matched ${JSON.stringify(match.match_text)} (offset ${match.match_offset}):\n      > ${context}`;
     })
     .join("\n");
@@ -915,12 +919,13 @@ function completionToExitPattern(completion: BgCompletion): PatternMatchEntry {
     task_id: completion.task_id,
     session_id: "",
     watch_id: "exit",
-    match_text: `exited (${status})`,
+    match_text: "",
     match_offset: 0,
     context: preview
       ? `task ${completion.task_id} exited (${status})\n${preview}`
       : `task ${completion.task_id} exited (${status})`,
     once: true,
+    reason: "task_exit",
   };
 }
 

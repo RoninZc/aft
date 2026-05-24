@@ -114,3 +114,65 @@ fn regex_pattern_matches_with_capture() {
     assert_eq!(frame["match_text"], "port 3000");
     assert!(aft.shutdown().success());
 }
+
+#[test]
+fn final_output_scan_emits_pattern_before_completion_on_exit_race() {
+    let mut aft = AftProcess::spawn();
+    let _dir = configure_background(&mut aft);
+    let task_id = spawn(&mut aft, "sleep 0.2; echo ready-now");
+    let response = notify(&mut aft, &task_id, json!({ "pattern": "ready-now" }));
+    assert_eq!(response["success"], true, "notify failed: {response:?}");
+
+    let started = Instant::now();
+    loop {
+        if let Some(frame) = aft.try_read_next_timeout(Duration::from_millis(200)) {
+            if frame["task_id"] == task_id {
+                assert_eq!(
+                    frame["type"], "bash_pattern_match",
+                    "watch-controlled task completed before final pattern scan: {frame:?}"
+                );
+                assert_eq!(frame["match_text"], "ready-now");
+                assert_eq!(frame["reason"], "pattern_match");
+                break;
+            }
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(6),
+            "timed out waiting for first terminal watch frame"
+        );
+    }
+    assert!(aft.shutdown().success());
+}
+
+#[test]
+fn watch_controlled_exit_emits_exit_safety_net_not_completion() {
+    let mut aft = AftProcess::spawn();
+    let _dir = configure_background(&mut aft);
+    let task_id = spawn(&mut aft, "sleep 0.2; echo never-matches-output");
+    let response = notify(&mut aft, &task_id, json!({ "pattern": "not-present" }));
+    assert_eq!(response["success"], true, "notify failed: {response:?}");
+
+    let started = Instant::now();
+    loop {
+        if let Some(frame) = aft.try_read_next_timeout(Duration::from_millis(200)) {
+            if frame["task_id"] != task_id {
+                continue;
+            }
+            assert_eq!(
+                frame["type"], "bash_pattern_match",
+                "watch-controlled task emitted a background completion: {frame:?}"
+            );
+            assert_eq!(frame["reason"], "task_exit");
+            assert!(frame["context"]
+                .as_str()
+                .unwrap()
+                .contains("never-matches-output"));
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(6),
+            "timed out waiting for exit safety-net frame"
+        );
+    }
+    assert!(aft.shutdown().success());
+}

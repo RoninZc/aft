@@ -729,11 +729,13 @@ impl BgTaskRegistry {
             let paths = task_paths(storage_dir, session_id, &metadata.task_id);
             match metadata.status {
                 BgTaskStatus::Starting => {
+                    let completion_was_delivered = metadata.completion_delivered;
                     metadata.mark_terminal(
                         BgTaskStatus::Failed,
                         None,
                         Some("spawn aborted".to_string()),
                     );
+                    metadata.completion_delivered |= completion_was_delivered;
                     let _ = self.persist_task(&paths, &metadata);
                     self.enqueue_completion_if_needed(&metadata, Some(&paths), false);
                     self.insert_rehydrated_task(metadata, paths, true)?;
@@ -741,28 +743,34 @@ impl BgTaskRegistry {
                 BgTaskStatus::Running | BgTaskStatus::Killing => {
                     if metadata.mode == BgMode::Pty {
                         if let Ok(Some(marker)) = read_exit_marker(&paths.exit) {
+                            let completion_was_delivered = metadata.completion_delivered;
                             metadata = terminal_metadata_from_marker(metadata, marker, None);
+                            metadata.completion_delivered |= completion_was_delivered;
                             let _ = self.persist_task(&paths, &metadata);
                             self.enqueue_completion_if_needed(&metadata, Some(&paths), false);
                             self.insert_rehydrated_task(metadata, paths, true)?;
                         } else if metadata.status.is_terminal() {
                             self.insert_rehydrated_task(metadata, paths, true)?;
                         } else {
+                            let completion_was_delivered = metadata.completion_delivered;
                             metadata.mark_terminal(
                                 BgTaskStatus::Killed,
                                 None,
                                 Some("pty_lost_on_bridge_restart".to_string()),
                             );
+                            metadata.completion_delivered |= completion_was_delivered;
                             let _ = self.persist_task(&paths, &metadata);
                             self.enqueue_completion_if_needed(&metadata, Some(&paths), false);
                             self.insert_rehydrated_task(metadata, paths, true)?;
                         }
                     } else if self.running_metadata_is_stale(&metadata) {
+                        let completion_was_delivered = metadata.completion_delivered;
                         metadata.mark_terminal(
                             BgTaskStatus::Killed,
                             None,
                             Some("orphaned (>24h)".to_string()),
                         );
+                        metadata.completion_delivered |= completion_was_delivered;
                         if !paths.exit.exists() {
                             let _ = write_kill_marker_if_absent(&paths.exit);
                         }
@@ -777,7 +785,9 @@ impl BgTaskRegistry {
                             crate::slog_warn!("background task {} had killing state with exit marker; preferring marker",
                             metadata.task_id);
                         }
+                        let completion_was_delivered = metadata.completion_delivered;
                         metadata = terminal_metadata_from_marker(metadata, marker, reason);
+                        metadata.completion_delivered |= completion_was_delivered;
                         let _ = self.persist_task(&paths, &metadata);
                         self.enqueue_completion_if_needed(&metadata, Some(&paths), false);
                         self.insert_rehydrated_task(metadata, paths, true)?;
@@ -785,20 +795,24 @@ impl BgTaskRegistry {
                         if !paths.exit.exists() {
                             let _ = write_kill_marker_if_absent(&paths.exit);
                         }
+                        let completion_was_delivered = metadata.completion_delivered;
                         metadata.mark_terminal(
                             BgTaskStatus::Killed,
                             None,
                             Some("recovered from inconsistent killing state on replay".to_string()),
                         );
+                        metadata.completion_delivered |= completion_was_delivered;
                         let _ = self.persist_task(&paths, &metadata);
                         self.enqueue_completion_if_needed(&metadata, Some(&paths), false);
                         self.insert_rehydrated_task(metadata, paths, true)?;
                     } else if metadata.child_pid.is_some_and(|pid| !is_process_alive(pid)) {
+                        let completion_was_delivered = metadata.completion_delivered;
                         metadata.mark_terminal(
                             BgTaskStatus::Failed,
                             None,
                             Some("process exited without exit marker".to_string()),
                         );
+                        metadata.completion_delivered |= completion_was_delivered;
                         let _ = self.persist_task(&paths, &metadata);
                         self.enqueue_completion_if_needed(&metadata, Some(&paths), false);
                         self.insert_rehydrated_task(metadata, paths, true)?;
@@ -894,12 +908,34 @@ impl BgTaskRegistry {
         pattern: WatchPattern,
         once: bool,
     ) -> Result<String, &'static str> {
+        let task_paths = self.task(&task_id).and_then(|task| {
+            task.state.lock().ok().map(|state| {
+                (
+                    state.metadata.mode.clone(),
+                    task.paths.stdout.clone(),
+                    task.paths.stderr.clone(),
+                    task.paths.pty.clone(),
+                )
+            })
+        });
         let mut registry = self
             .inner
             .watch_registry
             .lock()
             .map_err(|_| "watch_registry_poisoned")?;
-        registry.register(task_id, pattern, once)
+        let watch_id = registry.register(task_id.clone(), pattern, once)?;
+        if let Some((mode, stdout, stderr, pty)) = task_paths {
+            match mode {
+                BgMode::Pipes => {
+                    registry.prime_file_cursor(&format!("{task_id}:stdout"), &stdout);
+                    registry.prime_file_cursor(&format!("{task_id}:stderr"), &stderr);
+                }
+                BgMode::Pty => {
+                    registry.prime_file_cursor(&format!("{task_id}:pty"), &pty);
+                }
+            }
+        }
+        Ok(watch_id)
     }
 
     pub fn unregister_watch(&self, task_id: &str, watch_id: &str) {
@@ -914,6 +950,33 @@ impl BgTaskRegistry {
             .lock()
             .map(|registry| registry.active_count(task_id))
             .unwrap_or(0)
+    }
+
+    fn task_watch_state(&self, task_id: &str) -> (bool, bool) {
+        self.inner
+            .watch_registry
+            .lock()
+            .map(|registry| {
+                (
+                    registry.has_controlled_task(task_id),
+                    registry.has_matched_task(task_id),
+                )
+            })
+            .unwrap_or((false, false))
+    }
+
+    fn task_has_watch_control(&self, task_id: &str) -> bool {
+        self.inner
+            .watch_registry
+            .lock()
+            .map(|registry| registry.has_controlled_task(task_id))
+            .unwrap_or(false)
+    }
+
+    fn clear_task_watch_state(&self, task_id: &str) {
+        if let Ok(mut registry) = self.inner.watch_registry.lock() {
+            registry.clear_task(task_id);
+        }
     }
 
     pub(crate) fn scan_task_watch_output(&self, task: &Arc<BgTask>) {
@@ -1529,12 +1592,16 @@ impl BgTaskRegistry {
         if matches!(read_exit_marker(&task.paths.exit), Ok(Some(_))) {
             return;
         }
+        let watch_controlled = self.task_has_watch_control(&task.task_id);
         let updated = self.update_task_metadata(&task.paths, |metadata| {
             metadata.mark_terminal(
                 BgTaskStatus::Failed,
                 None,
                 Some("process exited without exit marker".to_string()),
             );
+            if watch_controlled {
+                metadata.completion_delivered = true;
+            }
         });
         if let Ok(metadata) = updated {
             state.pending_terminal_override = None;
@@ -1631,6 +1698,9 @@ impl BgTaskRegistry {
             if let Ok(Some(marker)) = read_exit_marker(&task.paths.exit) {
                 state.metadata =
                     terminal_metadata_from_marker(state.metadata.clone(), marker, None);
+                if self.task_has_watch_control(&task.task_id) {
+                    state.metadata.completion_delivered = true;
+                }
                 state.pending_terminal_override = None;
                 task.mark_terminal_now();
                 match &mut state.runtime {
@@ -1693,6 +1763,9 @@ impl BgTaskRegistry {
                     state
                         .metadata
                         .mark_terminal(terminal_status, exit_code, None);
+                    if self.task_has_watch_control(&task.task_id) {
+                        state.metadata.completion_delivered = true;
+                    }
                     state.pending_terminal_override = None;
                     task.mark_terminal_now();
                     self.persist_task(&task.paths, &state.metadata)
@@ -1726,42 +1799,57 @@ impl BgTaskRegistry {
         marker: ExitMarker,
         reason: Option<String>,
     ) -> Result<(), String> {
+        let watch_controlled = self.task_has_watch_control(&task.task_id);
+        {
+            let mut state = task
+                .state
+                .lock()
+                .map_err(|_| "background task lock poisoned".to_string())?;
+            if state.metadata.status.is_terminal() {
+                state.pending_terminal_override = None;
+                return Ok(());
+            }
+
+            let pending_override = state.pending_terminal_override.take();
+            let is_pty = state.metadata.mode == BgMode::Pty;
+            let updated = self
+                .update_task_metadata(&task.paths, |metadata| {
+                    let mut new_metadata = if is_pty && marker == ExitMarker::Killed {
+                        let mut metadata = metadata.clone();
+                        let target_status = pending_override.unwrap_or(BgTaskStatus::Killed);
+                        let exit_code = if target_status == BgTaskStatus::TimedOut {
+                            Some(124)
+                        } else {
+                            None
+                        };
+                        metadata.mark_terminal(target_status, exit_code, reason);
+                        metadata
+                    } else {
+                        terminal_metadata_from_marker(metadata.clone(), marker, reason)
+                    };
+                    if watch_controlled {
+                        new_metadata.completion_delivered = true;
+                    }
+                    *metadata = new_metadata;
+                })
+                .map_err(|e| format!("failed to persist terminal state: {e}"))?;
+            state.metadata = updated;
+            task.mark_terminal_now();
+            match &mut state.runtime {
+                TaskRuntime::Piped(child) => *child = None,
+                TaskRuntime::Pty(runtime) => *runtime = None,
+            }
+            state.detached = true;
+        }
+
+        // One final scan runs before terminal notification routing so bytes
+        // printed immediately before exit can win over the exit safety net.
+        self.scan_task_watch_output(task);
+
         let mut state = task
             .state
             .lock()
             .map_err(|_| "background task lock poisoned".to_string())?;
-        if state.metadata.status.is_terminal() {
-            state.pending_terminal_override = None;
-            return Ok(());
-        }
-
-        let pending_override = state.pending_terminal_override.take();
-        let is_pty = state.metadata.mode == BgMode::Pty;
-        let updated = self
-            .update_task_metadata(&task.paths, |metadata| {
-                let new_metadata = if is_pty && marker == ExitMarker::Killed {
-                    let mut metadata = metadata.clone();
-                    let target_status = pending_override.unwrap_or(BgTaskStatus::Killed);
-                    let exit_code = if target_status == BgTaskStatus::TimedOut {
-                        Some(124)
-                    } else {
-                        None
-                    };
-                    metadata.mark_terminal(target_status, exit_code, reason);
-                    metadata
-                } else {
-                    terminal_metadata_from_marker(metadata.clone(), marker, reason)
-                };
-                *metadata = new_metadata;
-            })
-            .map_err(|e| format!("failed to persist terminal state: {e}"))?;
-        state.metadata = updated;
-        task.mark_terminal_now();
-        match &mut state.runtime {
-            TaskRuntime::Piped(child) => *child = None,
-            TaskRuntime::Pty(runtime) => *runtime = None,
-        }
-        state.detached = true;
         state.buffer.enforce_terminal_cap();
         self.enqueue_completion_locked(&state.metadata, Some(&state.buffer), true);
         Ok(())
@@ -1855,6 +1943,15 @@ impl BgTaskRegistry {
         // meant compression accounting was effectively dead for >99% of
         // real-world bash usage.
         self.record_compression_event_if_applicable(metadata, &token_counts);
+
+        let (watch_controlled, watch_matched) = self.task_watch_state(&metadata.task_id);
+        if watch_controlled {
+            if emit_frame && !watch_matched {
+                self.emit_bash_watch_exit(&completion);
+            }
+            self.clear_task_watch_state(&metadata.task_id);
+            return;
+        }
 
         // Push-frame queue is gated on `completion_delivered` so foreground
         // bash with `notify_on_completion=false` does not leak a user-visible
@@ -2025,6 +2122,39 @@ impl BgTaskRegistry {
                 pattern_match.once,
             )));
         }
+    }
+
+    fn emit_bash_watch_exit(&self, completion: &BgCompletion) {
+        let Ok(progress_sender) = self
+            .inner
+            .progress_sender
+            .lock()
+            .map(|sender| sender.clone())
+        else {
+            return;
+        };
+        let Some(sender) = progress_sender.as_ref() else {
+            return;
+        };
+        let status = completion_status_text(&completion.status, completion.exit_code);
+        let preview = completion.output_preview.trim_end();
+        let context = if preview.is_empty() {
+            format!("task {} exited ({status})", completion.task_id)
+        } else {
+            format!(
+                "task {} exited ({status})
+{preview}",
+                completion.task_id
+            )
+        };
+        sender(PushFrame::BashPatternMatch(
+            BashPatternMatchFrame::task_exit(
+                completion.task_id.clone(),
+                completion.session_id.clone(),
+                format!("exited ({status})"),
+                context,
+            ),
+        ));
     }
 
     fn emit_bash_completed(&self, completion: BgCompletion) {
@@ -2242,6 +2372,16 @@ impl CompletionTokenCounts {
             compressed_bytes: None,
             tokens_skipped: true,
         }
+    }
+}
+
+fn completion_status_text(status: &BgTaskStatus, exit_code: Option<i32>) -> String {
+    match status {
+        BgTaskStatus::TimedOut => "timed out".to_string(),
+        BgTaskStatus::Killed => "killed".to_string(),
+        _ => exit_code
+            .map(|code| format!("exit {code}"))
+            .unwrap_or_else(|| format!("{status:?}").to_lowercase()),
     }
 }
 

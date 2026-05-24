@@ -792,3 +792,49 @@ fn background_task_ids_are_unique_across_rapid_spawns() {
 
     assert!(aft.shutdown().success());
 }
+
+#[test]
+fn replay_does_not_return_acknowledged_completion_after_restart() {
+    let mut aft = AftProcess::spawn();
+    let dir = configure_background(&mut aft);
+    let task_id = spawn_bg(&mut aft, "replay-acked", cross_platform_echo_command());
+    let _completed = wait_for_bash_completed_frame(&mut aft, &task_id);
+    let ack = aft.send(
+        &json!({
+            "id": "ack-replay-acked",
+            "command": "bash_ack_completions",
+            "params": { "task_ids": [task_id.clone()] }
+        })
+        .to_string(),
+    );
+    assert_eq!(ack["success"], true, "ack failed: {ack:?}");
+    assert!(aft.shutdown().success());
+
+    let mut restarted = AftProcess::spawn();
+    let response = restarted.send(
+        &json!({
+            "id": "cfg-bg-restart",
+            "command": "configure",
+            "harness": "opencode",
+            "project_root": dir.path(),
+            "storage_dir": dir.path().join("aft-storage"),
+            "experimental_bash_background": true,
+        })
+        .to_string(),
+    );
+    assert_eq!(response["success"], true, "configure failed: {response:?}");
+    let drained = restarted.send(
+        &json!({
+            "id": "drain-replay-acked",
+            "command": "bash_drain_completions",
+        })
+        .to_string(),
+    );
+    assert_eq!(drained["success"], true, "drain failed: {drained:?}");
+    assert_eq!(
+        drained["bg_completions"].as_array().unwrap().len(),
+        0,
+        "acknowledged completion replayed after restart: {drained:?}"
+    );
+    assert!(restarted.shutdown().success());
+}

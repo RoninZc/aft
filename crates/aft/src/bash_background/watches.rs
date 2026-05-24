@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -47,6 +47,8 @@ pub struct PatternMatch {
 pub struct WatchRegistry {
     watches: HashMap<String, Vec<WatchSpec>>,
     scan_cursors: HashMap<String, u64>,
+    controlled_tasks: HashSet<String>,
+    matched_tasks: HashSet<String>,
     next_watch: u64,
 }
 
@@ -61,6 +63,7 @@ impl WatchRegistry {
         if watches.len() >= MAX_WATCHES_PER_TASK {
             return Err("too_many_watches");
         }
+        self.controlled_tasks.insert(task_id.clone());
         self.next_watch = self.next_watch.wrapping_add(1);
         let watch_id = format!("watch-{:08x}", self.next_watch);
         watches.push(WatchSpec {
@@ -83,13 +86,34 @@ impl WatchRegistry {
 
     pub fn clear_task(&mut self, task_id: &str) {
         self.watches.remove(task_id);
+        self.controlled_tasks.remove(task_id);
+        self.matched_tasks.remove(task_id);
         let prefix = format!("{task_id}:");
         self.scan_cursors
             .retain(|key, _| key != task_id && !key.starts_with(&prefix));
     }
 
+    pub fn has_controlled_task(&self, task_id: &str) -> bool {
+        self.controlled_tasks.contains(task_id)
+    }
+
+    pub fn has_matched_task(&self, task_id: &str) -> bool {
+        self.matched_tasks.contains(task_id)
+    }
+
     pub fn active_count(&self, task_id: &str) -> usize {
         self.watches.get(task_id).map_or(0, Vec::len)
+    }
+
+    pub fn prime_file_cursor(&mut self, cursor_key: &str, path: &Path) {
+        if self.scan_cursors.contains_key(cursor_key) {
+            return;
+        }
+        let len = File::open(path)
+            .and_then(|file| file.metadata())
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        self.scan_cursors.insert(cursor_key.to_string(), len);
     }
 
     pub fn scan_file_new_bytes(
@@ -146,6 +170,7 @@ impl WatchRegistry {
         let mut remove_once = Vec::new();
         for watch in watches {
             if let Some((start, end, matched)) = find_match(&watch.pattern, &text) {
+                self.matched_tasks.insert(task_id.to_string());
                 matches.push(PatternMatch {
                     watch_id: watch.watch_id.clone(),
                     task_id: watch.task_id.clone(),

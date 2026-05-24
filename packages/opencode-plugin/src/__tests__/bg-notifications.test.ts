@@ -78,6 +78,7 @@ mock.module("../shared/live-server-client.js", () => ({
 import {
   __resetBgNotificationStateForTests,
   appendInTurnBgCompletions,
+  formatPatternMatchReminder,
   formatSystemReminder,
   handleIdleBgCompletions,
   handlePushedBgCompletion,
@@ -243,6 +244,46 @@ describe("OpenCode background notifications", () => {
     expect(reminder).toBe(
       "<system-reminder>\n[BACKGROUND BASH COMPLETED]\n- task empty1 (exit 0)\n</system-reminder>",
     );
+  });
+
+  test("formats pushed pattern matches with matched framing", () => {
+    expect(
+      formatPatternMatchReminder([
+        {
+          task_id: "bash-1",
+          session_id: "s1",
+          watch_id: "watch-1",
+          match_text: "vite-ready-on-port-3000",
+          match_offset: 42,
+          context: "vite-ready-on-port-3000",
+          once: true,
+          reason: "pattern_match",
+        },
+      ]),
+    ).toBe(
+      '<system-reminder>\n[BG BASH NOTIFY]\n- task bash-1 matched "vite-ready-on-port-3000" (offset 42):\n      > vite-ready-on-port-3000\n</system-reminder>',
+    );
+  });
+
+  test("formats exit safety-net notifications without matched framing", () => {
+    const reminder = formatPatternMatchReminder([
+      {
+        task_id: "bash-2",
+        session_id: "s1",
+        watch_id: "exit",
+        match_text: "",
+        match_offset: 0,
+        context: "task bash-2 exited (exit 0)\nvite-ready-on-port-3000",
+        once: true,
+        reason: "task_exit",
+      },
+    ]);
+
+    expect(reminder).toContain("- task bash-2 exited:");
+    expect(reminder).toContain("task bash-2 exited (exit 0)");
+    expect(reminder).toContain("vite-ready-on-port-3000");
+    expect(reminder).not.toContain("matched");
+    expect(reminder).not.toContain("offset 0");
   });
 
   test("in-turn delivery drains and appends reminder to tool output", async () => {

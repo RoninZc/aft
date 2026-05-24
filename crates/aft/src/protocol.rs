@@ -94,6 +94,7 @@ pub struct BashPatternMatchFrame {
     pub match_offset: u64,
     pub context: String,
     pub once: bool,
+    pub reason: &'static str,
 }
 
 /// Pushed after configure has completed, when the deferred file walk and
@@ -372,6 +373,26 @@ impl BashPatternMatchFrame {
             match_offset,
             context: context.into(),
             once,
+            reason: "pattern_match",
+        }
+    }
+
+    pub fn task_exit(
+        task_id: impl Into<String>,
+        session_id: impl Into<String>,
+        match_text: impl Into<String>,
+        context: impl Into<String>,
+    ) -> Self {
+        Self {
+            frame_type: "bash_pattern_match",
+            task_id: task_id.into(),
+            session_id: session_id.into(),
+            watch_id: "exit".to_string(),
+            match_text: match_text.into(),
+            match_offset: 0,
+            context: context.into(),
+            once: true,
+            reason: "task_exit",
         }
     }
 }
