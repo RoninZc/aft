@@ -405,3 +405,164 @@ fn bun_test_with_failures_preserves_chained_command_output() {
         "lost chained command output that runs after `bun test` (with `;` separator)"
     );
 }
+
+// ----------------------------------------------------------------------------
+// Subcommand-detector flag-value regression tests
+// ----------------------------------------------------------------------------
+//
+// All three package-manager compressors (bun, npm, pnpm) previously
+// extracted the subcommand by skipping past the program name and
+// returning the first non-flag token. That broke for invocations with
+// a flag-with-value PRECEDING the subcommand:
+//
+//   bun --cwd packages/opencode-plugin test ...
+//   npm --prefix packages/foo install ...
+//   pnpm --filter ./packages/foo test ...
+//
+// The detector returned the flag's VALUE (e.g. `packages/opencode-plugin`)
+// as the subcommand, so the per-subcommand path (`bun test` ->
+// `compress_test`) was missed and output fell through to the generic
+// compressor. For `bun test` specifically this dropped failure blocks
+// entirely (only the summary footer survived) and forced agents to
+// rerun with `grep` to find the failing test.
+//
+// Each compressor now uses a known-verb whitelist (see the
+// `*_SUBCOMMANDS` const in each compressor module).
+
+#[test]
+fn bun_test_with_cwd_flag_preserves_failure_block() {
+    // The exact shape AFT's CI + local Bun workspace tests use:
+    //   bun --cwd packages/opencode-plugin test src/__tests__/bash.test.ts
+    let output = "bun test v1.3.14 (0d9b296a)\n\
+\n\
+src/__tests__/bash.test.ts:\n\
+12 | expect(1 + 1).toBe(3);\n\
+                  ^\n\
+error: expect(received).toBe(expected)\n\
+\n\
+Expected: 3\n\
+Received: 2\n\
+\n\
+      at <anonymous> (/path/bash.test.ts:12:19)\n\
+(fail) bash adapter > rejects bad input [0.67ms]\n\
+\n\
+ 0 pass\n\
+ 1 fail\n\
+ 1 expect() calls\n\
+Ran 1 tests across 1 file. [37.00ms]\n";
+
+    let compressed = BunCompressor.compress(
+        "bun --cwd packages/opencode-plugin test src/__tests__/bash.test.ts",
+        output,
+    );
+
+    // The bug: failure block dropped, only summary footer survived.
+    assert!(
+        compressed.contains("error: expect(received).toBe(expected)"),
+        "regression: `bun --cwd <dir> test` lost the per-test failure block. \
+         Output was: {compressed}"
+    );
+    assert!(
+        compressed.contains("(fail) bash adapter > rejects bad input"),
+        "regression: lost the (fail) marker for `bun --cwd <dir> test`. \
+         Output was: {compressed}"
+    );
+    // Summary preserved (compressor strips some whitespace, so match the
+    // counted-pass/fail tokens without leading space).
+    assert!(compressed.contains("1 fail"));
+    assert!(compressed.contains("Ran 1 tests across 1 file"));
+}
+
+#[test]
+fn bun_test_with_multiple_flags_still_finds_subcommand() {
+    // Compound flag-with-value forms.
+    let output = "bun test v1.3.14 (0d9b296a)\n\
+\n\
+src/foo.test.ts:\n\
+5 | expect(2).toBe(3);\n\
+              ^\n\
+error: assertion failed\n\
+(fail) foo test [0.1ms]\n\
+\n\
+ 0 pass\n\
+ 1 fail\n\
+ 1 expect() calls\n\
+Ran 1 tests across 1 file. [10.00ms]\n";
+
+    for cmd in [
+        "bun --cwd /tmp/proj test src/foo.test.ts",
+        "bun --cwd /tmp/proj --silent test src/foo.test.ts",
+        "bun --silent --cwd /tmp/proj test",
+        "bun -c /tmp/bunfig.toml --cwd /tmp/proj test",
+    ] {
+        let compressed = BunCompressor.compress(cmd, output);
+        assert!(
+            compressed.contains("error: assertion failed"),
+            "regression: `{cmd}` lost the failure block. Output was: {compressed}"
+        );
+    }
+}
+
+#[test]
+fn npm_install_with_prefix_flag_uses_install_compressor() {
+    // npm --prefix <dir> install ...
+    // Previously `--prefix`'s value was returned as the subcommand,
+    // falling through to generic and missing npm-install-specific
+    // progress filtering.
+    let output = "npm http fetch GET 200 https://registry.npmjs.org/foo 123ms\n\
+npm http fetch GET 200 https://registry.npmjs.org/bar 456ms\n\
+npm WARN deprecated old-pkg@1.0.0: Use new-pkg instead\n\
+\n\
+added 42 packages in 2s\n\
+\n\
+audited 100 packages in 2s\n\
+\n\
+3 packages are looking for funding\n\
+  run `npm fund` for details\n\
+\n\
+found 0 vulnerabilities\n";
+
+    let compressed = NpmCompressor.compress("npm --prefix /tmp/proj install", output);
+
+    // Progress lines should be filtered (install-specific behavior).
+    assert!(
+        !compressed.contains("npm http fetch GET 200"),
+        "regression: `npm --prefix <dir> install` fell through to generic and kept progress lines. \
+         Output was: {compressed}"
+    );
+    // Summary preserved.
+    assert!(compressed.contains("audited 100 packages"));
+    assert!(compressed.contains("found 0 vulnerabilities"));
+}
+
+#[test]
+fn pnpm_install_with_filter_flag_uses_package_compressor() {
+    // pnpm --filter ./packages/foo install
+    // Previously `--filter`'s value was returned as the subcommand.
+    let output = "Progress: resolved 10, downloaded 5, added 0\n\
+Progress: resolved 50, downloaded 25, added 10\n\
+Progress: resolved 100, downloaded 50, added 25\n\
+Progress: resolved 200, downloaded 100, added 50\n\
+Progress: resolved 300, downloaded 150, added 75\n\
+dependencies:\n\
++ foo 1.0.0\n\
++ bar 2.0.0\n\
+\n\
+Done in 5.2s\n";
+
+    let compressed = PnpmCompressor.compress("pnpm --filter ./packages/foo install", output);
+
+    // Should hit the package compressor: progress is capped to 2 entries.
+    let progress_count = compressed
+        .lines()
+        .filter(|l| l.contains("Progress: resolved"))
+        .count();
+    assert!(
+        progress_count <= 2,
+        "regression: `pnpm --filter <pattern> install` fell through to generic and kept all \
+         {progress_count} progress lines (should be <= 2). Output was: {compressed}"
+    );
+    // Summary preserved.
+    assert!(compressed.contains("Done in 5.2s"));
+    assert!(compressed.contains("dependencies:"));
+}

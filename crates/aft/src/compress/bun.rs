@@ -31,12 +31,36 @@ impl Compressor for BunCompressor {
     }
 }
 
+/// Known bun subcommands we want to match on. Used by `bun_subcommand`
+/// to safely skip over flag values like `--cwd <dir>` that would
+/// otherwise be misread as the subcommand. Listing only the
+/// subcommands the compressor actually dispatches on plus the most
+/// common bun verbs keeps the set small without missing real cases.
+///
+/// Full bun verb set (per `bun --help`): install, add, remove, update,
+/// outdated, link, unlink, why, audit, patch, pm, publish, pack, run,
+/// test, x, exec, create, init, build, repl, upgrade.
+const BUN_SUBCOMMANDS: &[&str] = &[
+    "install", "i", "add", "remove", "update", "outdated", "link", "unlink", "why", "audit",
+    "patch", "pm", "publish", "pack", "run", "test", "x", "exec", "create", "init", "build",
+    "repl", "upgrade", "help", "info",
+];
+
+/// Detect the bun subcommand from a command line.
+///
+/// Important: previous implementations used `find(!starts_with('-'))`
+/// which broke for `bun --cwd packages/opencode-plugin test` — the
+/// flag's value (`packages/opencode-plugin`) was returned as the
+/// subcommand, causing the bun-test compressor to silently fall
+/// through to the generic compressor and drop per-test failure
+/// blocks. We now match against a whitelist of known bun verbs so
+/// flag values are skipped safely.
 fn bun_subcommand(command: &str) -> Option<String> {
     command
         .split_whitespace()
         .skip_while(|token| *token != "bun")
         .skip(1)
-        .find(|token| !token.starts_with('-'))
+        .find(|token| BUN_SUBCOMMANDS.contains(token))
         .map(ToString::to_string)
 }
 

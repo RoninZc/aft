@@ -26,12 +26,73 @@ impl Compressor for NpmCompressor {
     }
 }
 
+/// Known npm subcommands. Same rationale as bun.rs::BUN_SUBCOMMANDS —
+/// using a whitelist instead of "first non-flag" avoids returning flag
+/// values like `--prefix <dir>` as the subcommand for command lines
+/// such as `npm --prefix packages/foo install`.
+const NPM_SUBCOMMANDS: &[&str] = &[
+    "install",
+    "i",
+    "ci",
+    "uninstall",
+    "remove",
+    "rm",
+    "update",
+    "up",
+    "audit",
+    "outdated",
+    "publish",
+    "pack",
+    "run",
+    "run-script",
+    "test",
+    "t",
+    "start",
+    "stop",
+    "restart",
+    "exec",
+    "x",
+    "init",
+    "create",
+    "build",
+    "link",
+    "unlink",
+    "view",
+    "info",
+    "show",
+    "config",
+    "help",
+    "version",
+    "search",
+    "ls",
+    "list",
+    "ping",
+    "whoami",
+    "login",
+    "logout",
+    "dedupe",
+    "dist-tag",
+    "team",
+    "owner",
+    "doctor",
+    "fund",
+    "explain",
+    "diff",
+    "rebuild",
+    "deprecate",
+    "hook",
+    "org",
+    "profile",
+    "set-script",
+    "pkg",
+];
+
 fn npm_subcommand(command: &str) -> Option<String> {
     command
         .split_whitespace()
         .skip_while(|token| *token != "npm")
         .skip(1)
-        .find(|token| !token.starts_with('-'))
+        .find(|token| NPM_SUBCOMMANDS.contains(token))
         .map(ToString::to_string)
 }
 

@@ -24,12 +24,77 @@ impl Compressor for PnpmCompressor {
     }
 }
 
+/// Known pnpm subcommands. Same rationale as bun.rs::BUN_SUBCOMMANDS —
+/// using a whitelist instead of "first non-flag" avoids returning flag
+/// values like `--filter <pattern>` as the subcommand for command lines
+/// such as `pnpm --filter ./packages/foo test`.
+const PNPM_SUBCOMMANDS: &[&str] = &[
+    "install",
+    "i",
+    "add",
+    "remove",
+    "rm",
+    "uninstall",
+    "un",
+    "update",
+    "up",
+    "upgrade",
+    "outdated",
+    "audit",
+    "outdated-of",
+    "publish",
+    "pack",
+    "run",
+    "test",
+    "t",
+    "exec",
+    "x",
+    "dlx",
+    "create",
+    "init",
+    "build",
+    "start",
+    "link",
+    "unlink",
+    "view",
+    "info",
+    "show",
+    "config",
+    "help",
+    "version",
+    "ls",
+    "list",
+    "list-modules",
+    "list-bin",
+    "ping",
+    "whoami",
+    "login",
+    "logout",
+    "deploy",
+    "dedupe",
+    "fetch",
+    "import",
+    "patch",
+    "patch-commit",
+    "patch-remove",
+    "prune",
+    "rebuild",
+    "recursive",
+    "root",
+    "store",
+    "why",
+    "doctor",
+    "env",
+    "server",
+    "setup",
+];
+
 fn pnpm_subcommand(command: &str) -> Option<String> {
     command
         .split_whitespace()
         .skip_while(|token| *token != "pnpm")
         .skip(1)
-        .find(|token| !token.starts_with('-'))
+        .find(|token| PNPM_SUBCOMMANDS.contains(token))
         .map(ToString::to_string)
 }
 
