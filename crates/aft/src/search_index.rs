@@ -1519,7 +1519,20 @@ pub(crate) fn cached_path_under_root(root: &Path, relative_path: &Path) -> Optio
     let relative = validate_cached_relative_path(relative_path)?;
     let normalized_root = normalize_path(root);
     let full_path = normalize_path(&normalized_root.join(relative));
-    full_path.starts_with(&normalized_root).then_some(full_path)
+
+    match fs::canonicalize(&full_path) {
+        Ok(canonical_path) => {
+            if canonical_path.starts_with(&normalized_root) {
+                return Some(full_path);
+            }
+
+            let canonical_root = fs::canonicalize(&normalized_root).ok()?;
+            canonical_path
+                .starts_with(&canonical_root)
+                .then_some(full_path)
+        }
+        Err(_) => full_path.starts_with(&normalized_root).then_some(full_path),
+    }
 }
 
 pub(crate) fn validate_cached_relative_path(path: &Path) -> Option<PathBuf> {
@@ -2130,6 +2143,34 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+
+    #[test]
+    fn cached_path_under_root_allows_missing_lexical_child() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).expect("create project dir");
+        let root = fs::canonicalize(&project).expect("canonicalize project");
+
+        let path = cached_path_under_root(&root, Path::new("future/file.rs"))
+            .expect("missing child should fall back to lexical validation");
+
+        assert_eq!(path, root.join("future/file.rs"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cached_path_under_root_rejects_symlink_escape() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let project = dir.path().join("project");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&project).expect("create project dir");
+        fs::create_dir_all(&outside).expect("create outside dir");
+        fs::write(outside.join("secret.txt"), "secret").expect("write outside file");
+        std::os::unix::fs::symlink(&outside, project.join("link")).expect("create symlink");
+        let root = fs::canonicalize(&project).expect("canonicalize project");
+
+        assert!(cached_path_under_root(&root, Path::new("link/secret.txt")).is_none());
+    }
 
     #[test]
     fn extract_trigrams_tracks_next_char_and_position() {

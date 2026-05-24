@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ToolDefinition } from "@opencode-ai/plugin";
+import type { ToolContext, ToolDefinition } from "@opencode-ai/plugin";
 import { z } from "zod";
 import type { PluginContext } from "../types.js";
 import { callBridge } from "./_shared.js";
@@ -12,6 +12,8 @@ import {
 } from "./permissions.js";
 
 type ToolArg = ToolDefinition["args"][string];
+type SearchPathKind = "file" | "directory";
+type SearchPathTarget = { target: string; kind: SearchPathKind };
 
 type GrepMatch = {
   file?: string;
@@ -62,6 +64,54 @@ function normalizeGlob(pattern: string): string {
     return `**/${pattern}`;
   }
   return pattern;
+}
+
+function absoluteSearchPath(context: ToolContext, target: string): string {
+  return path.isAbsolute(target) ? target : path.resolve(context.directory, target);
+}
+
+function searchPathExists(context: ToolContext, target: string): boolean {
+  return fs.existsSync(absoluteSearchPath(context, target));
+}
+
+function splitSearchPathArg(context: ToolContext, raw: string): string[] {
+  if (searchPathExists(context, raw) || !/\s/.test(raw)) {
+    return [raw];
+  }
+
+  const fragments = raw.trim().split(/\s+/).filter(Boolean);
+  if (fragments.length < 2 || !fragments.every((fragment) => searchPathExists(context, fragment))) {
+    return [raw];
+  }
+
+  return fragments;
+}
+
+function searchPathKind(
+  context: ToolContext,
+  target: string,
+  defaultKind: SearchPathKind,
+): SearchPathKind {
+  try {
+    const stat = fs.lstatSync(absoluteSearchPath(context, target));
+    if (defaultKind === "file") {
+      return stat.isDirectory() ? "directory" : "file";
+    }
+    return stat.isFile() ? "file" : "directory";
+  } catch {
+    return defaultKind;
+  }
+}
+
+function searchPathTargets(
+  context: ToolContext,
+  raw: string,
+  defaultKind: SearchPathKind,
+): SearchPathTarget[] {
+  return splitSearchPathArg(context, raw).map((target) => ({
+    target,
+    kind: searchPathKind(context, target, defaultKind),
+  }));
 }
 
 /**
@@ -132,17 +182,12 @@ export function searchTools(ctx: PluginContext): Record<string, ToolDefinition> 
       if (grepDenied) return permissionDeniedResponse(grepDenied);
 
       if (pathArg) {
-        let kind: "file" | "directory" = "file";
-        try {
-          const abs = path.isAbsolute(pathArg) ? pathArg : path.resolve(context.directory, pathArg);
-          if (fs.lstatSync(abs).isDirectory()) kind = "directory";
-        } catch {
-          // Stat failed; conservative default "file" already set.
+        for (const target of searchPathTargets(context, pathArg, "file")) {
+          const externalDenied = await assertExternalDirectoryPermission(context, target.target, {
+            kind: target.kind,
+          });
+          if (externalDenied) return permissionDeniedResponse(externalDenied);
         }
-        const externalDenied = await assertExternalDirectoryPermission(context, pathArg, {
-          kind,
-        });
-        if (externalDenied) return permissionDeniedResponse(externalDenied);
       }
 
       const response = await callBridge(ctx, context, "grep", {
@@ -179,7 +224,9 @@ export function searchTools(ctx: PluginContext): Record<string, ToolDefinition> 
       let globPath = args.path ? String(args.path) : undefined;
 
       if (!globPath && globPattern.startsWith("/")) {
-        // Find the last directory component before any glob metacharacters
+        // Find the last directory component before any glob metacharacters.
+        // Exact absolute paths need the same split because the bridge matches
+        // glob patterns relative to the search path.
         const metaIdx = globPattern.search(/[*?{}[\]]/);
         if (metaIdx > 0) {
           const lastSlash = globPattern.lastIndexOf("/", metaIdx);
@@ -187,6 +234,9 @@ export function searchTools(ctx: PluginContext): Record<string, ToolDefinition> 
             globPath = globPattern.slice(0, lastSlash);
             globPattern = `**/${globPattern.slice(lastSlash + 1)}`;
           }
+        } else if (metaIdx === -1) {
+          globPath = path.dirname(globPattern);
+          globPattern = path.basename(globPattern);
         }
       }
 
@@ -197,19 +247,12 @@ export function searchTools(ctx: PluginContext): Record<string, ToolDefinition> 
       if (globDenied) return permissionDeniedResponse(globDenied);
 
       if (globPath) {
-        let kind: "file" | "directory" = "directory";
-        try {
-          const abs = path.isAbsolute(globPath)
-            ? globPath
-            : path.resolve(context.directory, globPath);
-          if (fs.lstatSync(abs).isFile()) kind = "file";
-        } catch {
-          // Stat failed; keep "directory" as conservative default for glob.
+        for (const target of searchPathTargets(context, globPath, "directory")) {
+          const externalDenied = await assertExternalDirectoryPermission(context, target.target, {
+            kind: target.kind,
+          });
+          if (externalDenied) return permissionDeniedResponse(externalDenied);
         }
-        const externalDenied = await assertExternalDirectoryPermission(context, globPath, {
-          kind,
-        });
-        if (externalDenied) return permissionDeniedResponse(externalDenied);
       }
 
       const response = await callBridge(ctx, context, "glob", {
