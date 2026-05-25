@@ -2377,7 +2377,14 @@ mod tests {
         let result = detect_formatter(&path, LangId::Rust, &config);
         if resolve_tool("rustfmt", config.project_root.as_deref()).is_some() {
             let (cmd, args) = result.unwrap();
-            assert_eq!(cmd, "rustfmt");
+            // Windows resolves to `rustfmt.exe` and may include a full path
+            // (e.g. `C:\Users\...\.cargo\bin\rustfmt.exe`). Just require the
+            // command stem to be `rustfmt`.
+            let stem = std::path::Path::new(&cmd)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            assert_eq!(stem, "rustfmt", "expected rustfmt, got {cmd}");
             assert!(args.iter().any(|a| a.ends_with("test.rs")));
         } else {
             assert!(result.is_none());
@@ -2396,11 +2403,25 @@ mod tests {
         let result = detect_formatter(&path, LangId::Go, &config);
         if resolve_tool("goimports", config.project_root.as_deref()).is_some() {
             let (cmd, args) = result.unwrap();
-            assert_eq!(cmd, "goimports");
+            assert_eq!(
+                std::path::Path::new(&cmd)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(""),
+                "goimports",
+                "expected goimports, got {cmd}"
+            );
             assert!(args.contains(&"-w".to_string()));
         } else if resolve_tool("gofmt", config.project_root.as_deref()).is_some() {
             let (cmd, args) = result.unwrap();
-            assert_eq!(cmd, "gofmt");
+            assert_eq!(
+                std::path::Path::new(&cmd)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(""),
+                "gofmt",
+                "expected gofmt, got {cmd}"
+            );
             assert!(args.contains(&"-w".to_string()));
         } else {
             assert!(result.is_none());
@@ -2419,7 +2440,14 @@ mod tests {
         let result = detect_formatter(&path, LangId::Python, &config);
         if ruff_format_available(config.project_root.as_deref()) {
             let (cmd, args) = result.unwrap();
-            assert_eq!(cmd, "ruff");
+            assert_eq!(
+                std::path::Path::new(&cmd)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(""),
+                "ruff",
+                "expected ruff, got {cmd}"
+            );
             assert!(args.contains(&"format".to_string()));
         } else {
             assert!(result.is_none());
@@ -2757,7 +2785,14 @@ mod tests {
         let result = detect_type_checker(&path, LangId::Rust, &config);
         if resolve_tool("cargo", config.project_root.as_deref()).is_some() {
             let (cmd, args) = result.unwrap();
-            assert_eq!(cmd, "cargo");
+            assert_eq!(
+                std::path::Path::new(&cmd)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(""),
+                "cargo",
+                "expected cargo, got {cmd}"
+            );
             assert!(args.contains(&"check".to_string()));
         } else {
             assert!(result.is_none());
