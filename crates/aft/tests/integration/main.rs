@@ -23,6 +23,7 @@ mod checkpoint_metadata_test;
 mod commands_test;
 mod compress_cli_commands_test;
 mod compress_filters_test;
+mod compress_output_shape_test;
 mod compression_events_test;
 mod configure_test;
 mod db_read_fallback_test;

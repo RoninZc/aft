@@ -1,17 +1,20 @@
 //! Output compression for hoisted bash.
 //!
-//! Compression has four tiers, tried in this order:
+//! Compression has five tiers, tried in this order:
 //!
 //! 1. **Specific Rust [`Compressor`] modules** — hand-written parsers for
 //!    specific tools identified by tool tokens (for example `vitest`, `eslint`,
 //!    `cargo`, `git`). These win before broad package-manager compressors.
-//! 2. **Package-manager [`Compressor`] modules** — broad head-token matchers
+//! 2. **Output-shape [`Compressor`] sniffers** — inner-tool parsers that can
+//!    recognize their own private summaries even when invoked through wrappers
+//!    such as `npm test`, `make test`, or `./scripts/check.sh`.
+//! 3. **Package-manager [`Compressor`] modules** — broad head-token matchers
 //!    (`npm`, `pnpm`, `bun`) that compress unclaimed package-manager output.
-//! 3. **TOML filters** — declarative strip + truncate + cap + shortcircuit
+//! 4. **TOML filters** — declarative strip + truncate + cap + shortcircuit
 //!    rules for the long tail of CLI tools. Loaded from builtin / user /
 //!    project sources via [`toml_filter::build_registry`]. See
 //!    [`toml_filter`] and [`trust`] for the trust model.
-//! 4. **[`generic`] fallback** — ANSI strip + consecutive-dedup +
+//! 5. **[`generic`] fallback** — ANSI strip + consecutive-dedup +
 //!    middle-truncate. Always applies when no Rust module or TOML filter
 //!    matches.
 
@@ -79,7 +82,8 @@ pub type SharedFilterRegistry = Arc<RwLock<FilterRegistry>>;
 /// not claimed by VitestCompressor, BunCompressor still wants the chance
 /// to compress generic bun output for unknown subcommands.
 ///
-/// Dispatch order: Specific tier first, then PackageManager tier, then
+/// Dispatch order: Specific command tier first, then output-shape sniffers
+/// (Specific before PackageManager), then PackageManager command tier, then
 /// TOML filters, then GenericCompressor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Specificity {
@@ -89,7 +93,7 @@ pub enum Specificity {
 
 /// A `Compressor` knows how to reduce one specific command's output to fewer
 /// tokens while preserving the information the agent needs.
-pub trait Compressor {
+pub trait Compressor: Send + Sync {
     /// Returns true if this compressor handles the given command head + args.
     /// Called after generic detection (ANSI strip, dedup) so this is per-command logic only.
     fn matches(&self, command: &str) -> bool;
@@ -100,9 +104,23 @@ pub trait Compressor {
     fn specificity(&self) -> Specificity {
         Specificity::Specific
     }
+
+    /// Returns true when this compressor recognizes output produced by its
+    /// inner tool even if the command head was a wrapper (`npm test`,
+    /// `make test`, `./scripts/check.sh`, etc.). Wrapper compressors should
+    /// not override this; they remain command-only.
+    fn matches_output(&self, _output: &str) -> bool {
+        false
+    }
+
+    /// Compress output after an output-shape match. Compressors that branch by
+    /// subcommand override this to jump directly to the matched branch.
+    fn compress_output_match(&self, output: &str) -> String {
+        self.compress("", output)
+    }
 }
 
-/// Top-level dispatch: try specific Rust modules, package-manager modules, TOML filters, then generic fallback.
+/// Top-level dispatch: try specific Rust modules, output-shape sniffers, package-manager modules, TOML filters, then generic fallback.
 ///
 /// Convenience wrapper for command handlers that already hold an `AppContext`.
 /// Backs onto [`compress_with_registry`] which is thread-safe for use from the
@@ -155,7 +173,7 @@ pub fn compress_with_registry(command: &str, output: &str, registry: &FilterRegi
         &NextCompressor,
     ];
 
-    // Tier 1a: Specific compressors win first.
+    // Tier 1a: Specific command compressors win first.
     for compressor in compressors
         .iter()
         .filter(|c| c.specificity() == Specificity::Specific)
@@ -165,7 +183,23 @@ pub fn compress_with_registry(command: &str, output: &str, registry: &FilterRegi
         }
     }
 
-    // Tier 1b: PackageManager compressors get unclaimed commands.
+    // Tier 1b: Output-shape sniffers handle wrapped inner tools before broad
+    // package managers or TOML filters can consume `npm test`, `make test`,
+    // `just test`, etc. Collision order is deterministic: Specific compressors
+    // in registry order win before PackageManager sniffers (currently Bun's
+    // test-output signature).
+    for specificity in [Specificity::Specific, Specificity::PackageManager] {
+        for compressor in compressors
+            .iter()
+            .filter(|c| c.specificity() == specificity)
+        {
+            if compressor.matches_output(&stripped_for_generic) {
+                return compressor.compress_output_match(&stripped_for_generic);
+            }
+        }
+    }
+
+    // Tier 1c: PackageManager compressors get unclaimed commands.
     for compressor in compressors
         .iter()
         .filter(|c| c.specificity() == Specificity::PackageManager)
@@ -638,17 +672,13 @@ mod dispatch_specificity_tests {
 
     #[test]
     fn npm_test_routes_to_vitest_when_output_is_vitest_shaped() {
-        // npm test typically runs vitest/jest under the hood. With specificity
-        // dispatch, vitest's matches() returns false for "npm test" alone
-        // (vitest's matcher looks for the token "vitest" or "jest").
-        // So this should fall through to NpmCompressor (PackageManager tier).
-        // This is the correct behavior: npm-managed test output is generic
-        // unless we have explicit token evidence of the runner.
-        let output = "added 100 packages, removed 2 packages\n";
-        let _compressed = dispatch("npm test", output);
-        // Just assert it didn't panic and emitted something. The PackageManager
-        // module's `Some("test") => GenericCompressor` is the right fallback
-        // here because we have no token signal.
+        // `npm test` has no vitest token, so this proves the output-shape
+        // tier runs before the broad NpmCompressor PackageManager tier.
+        let output = "RERUN src/foo.test.ts x1\nFAIL src/foo.test.ts\nTest Files  1 failed (1)\nDuration    120ms\n";
+        let compressed = dispatch("npm test", output);
+        assert!(compressed.contains("FAIL src/foo.test.ts"));
+        assert!(compressed.contains("Duration    120ms"));
+        assert!(!compressed.contains("RERUN"));
     }
 
     #[test]
@@ -684,16 +714,12 @@ mod dispatch_specificity_tests {
     }
 
     #[test]
-    fn npm_run_lint_with_eslint_token_routes_to_eslint() {
-        // `npm run lint` typically runs eslint, but the command string is
-        // just "npm run lint" — no eslint token. This should fall through
-        // to NpmCompressor's PackageManager tier (which then dispatches to
-        // generic for "run"). That's correct: we don't have token evidence.
+    fn npm_run_lint_without_linter_output_shape_falls_back() {
+        // `npm run lint` has no eslint token, and this output has no eslint
+        // summary signature, so it should remain package-manager generic.
         let output = "> my-project@1.0.0 lint\n> eslint .\n\nAll good.\n";
-        let _compressed = dispatch("npm run lint", output);
-        // No assertion needed — just verifying no panic. The behavior is
-        // correctly "fall through to generic" because the command string
-        // has no eslint token.
+        let compressed = dispatch("npm run lint", output);
+        assert!(compressed.contains("All good."));
     }
 
     #[test]

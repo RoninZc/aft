@@ -27,6 +27,31 @@ impl Compressor for BiomeCompressor {
     fn compress(&self, _command: &str, output: &str) -> String {
         compress_biome(output)
     }
+
+    fn matches_output(&self, output: &str) -> bool {
+        output
+            .lines()
+            .any(|line| is_biome_output_rule_header(line.trim()))
+            || looks_like_biome_json_output(output)
+    }
+}
+
+fn looks_like_biome_json_output(output: &str) -> bool {
+    let trimmed = output.trim_start();
+    if !trimmed.starts_with('{') {
+        return false;
+    }
+
+    serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .is_some_and(|value| value.get("diagnostics").is_some() || value.get("errors").is_some())
+}
+
+fn is_biome_output_rule_header(trimmed: &str) -> bool {
+    trimmed.contains('━')
+        && (trimmed.starts_with("lint/")
+            || trimmed.starts_with("assist/")
+            || trimmed.starts_with("format/"))
 }
 
 fn compress_biome(output: &str) -> String {

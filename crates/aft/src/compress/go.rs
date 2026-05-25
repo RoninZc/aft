@@ -1,6 +1,7 @@
 use crate::compress::generic::GenericCompressor;
 use crate::compress::Compressor;
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::BTreeMap;
 
 pub struct GoCompressor;
@@ -21,6 +22,14 @@ impl Compressor for GoCompressor {
             _ => GenericCompressor::compress_output(output),
         }
     }
+
+    fn matches_output(&self, output: &str) -> bool {
+        looks_like_go_test_output(output)
+    }
+
+    fn compress_output_match(&self, output: &str) -> String {
+        compress_test(output)
+    }
 }
 
 pub struct GolangciLintCompressor;
@@ -35,6 +44,47 @@ impl Compressor for GolangciLintCompressor {
     fn compress(&self, _command: &str, output: &str) -> String {
         compress_golangci(output)
     }
+
+    fn matches_output(&self, output: &str) -> bool {
+        looks_like_golangci_output(output)
+    }
+}
+
+fn looks_like_go_test_output(output: &str) -> bool {
+    let mut has_run = false;
+    let mut has_case_result = false;
+    let mut has_final = false;
+
+    for line in output.lines() {
+        let trimmed = line.trim_start();
+        has_run |= trimmed.starts_with("=== RUN");
+        has_case_result |= trimmed.starts_with("--- PASS:") || trimmed.starts_with("--- FAIL:");
+        has_final |= is_go_test_output_final_line(trimmed);
+    }
+
+    has_final || (has_run && has_case_result)
+}
+
+fn looks_like_golangci_output(output: &str) -> bool {
+    let trimmed = output.trim_start();
+    if trimmed.starts_with('{') && looks_like_golangci_json_root(trimmed) {
+        return true;
+    }
+
+    let mut has_summary = false;
+    let mut has_issue = false;
+    for line in output.lines() {
+        let trimmed = line.trim_start();
+        has_summary |= is_golangci_summary_header(trimmed);
+        has_issue |= is_golangci_issue_line(trimmed);
+    }
+    has_summary && has_issue
+}
+
+fn looks_like_golangci_json_root(output: &str) -> bool {
+    serde_json::from_str::<Value>(output)
+        .ok()
+        .is_some_and(|value| value.get("Issues").and_then(Value::as_array).is_some())
 }
 
 fn go_subcommand(command: &str) -> Option<String> {
@@ -254,6 +304,15 @@ fn is_go_download_chatter(trimmed: &str) -> bool {
     trimmed.starts_with("go: downloading ")
         || trimmed.starts_with("go: finding ")
         || trimmed.starts_with("go: extracting ")
+}
+
+fn is_go_test_output_final_line(trimmed: &str) -> bool {
+    trimmed == "PASS"
+        || trimmed == "FAIL"
+        || trimmed.starts_with("ok  ")
+        || trimmed.starts_with("ok	")
+        || trimmed.starts_with("FAIL  ")
+        || trimmed.starts_with("FAIL	")
 }
 
 fn is_final_go_test_line(trimmed: &str) -> bool {

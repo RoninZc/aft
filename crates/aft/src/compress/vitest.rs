@@ -23,6 +23,54 @@ impl Compressor for VitestCompressor {
     fn compress(&self, command: &str, output: &str) -> String {
         compress_test_runner(command, output)
     }
+
+    fn matches_output(&self, output: &str) -> bool {
+        looks_like_vitest_output(output)
+            || looks_like_jest_output(output)
+            || looks_like_jest_json_output(output)
+    }
+
+    fn compress_output_match(&self, output: &str) -> String {
+        if looks_like_jest_output(output) {
+            compress_test_runner("jest", output)
+        } else {
+            compress_test_runner("vitest", output)
+        }
+    }
+}
+
+fn looks_like_vitest_output(output: &str) -> bool {
+    let mut has_test_files = false;
+    let mut has_duration = false;
+    for line in output.lines() {
+        let trimmed = line.trim_start();
+        has_test_files |= trimmed.starts_with("Test Files ");
+        has_duration |= trimmed.starts_with("Duration ");
+    }
+    has_test_files && has_duration
+}
+
+fn looks_like_jest_output(output: &str) -> bool {
+    let mut has_test_suites = false;
+    let mut has_tests = false;
+    for line in output.lines() {
+        let trimmed = line.trim_start();
+        has_test_suites |= trimmed.starts_with("Test Suites: ");
+        has_tests |= trimmed.starts_with("Tests: ");
+    }
+    has_test_suites && has_tests
+}
+
+fn looks_like_jest_json_output(output: &str) -> bool {
+    let trimmed = output.trim_start();
+    if !trimmed.starts_with('{') {
+        return false;
+    }
+    serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .is_some_and(|value| {
+            value.get("numTotalTests").is_some() && value.get("testResults").is_some()
+        })
 }
 
 fn compress_test_runner(command: &str, output: &str) -> String {

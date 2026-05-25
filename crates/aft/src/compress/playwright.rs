@@ -25,6 +25,49 @@ impl Compressor for PlaywrightCompressor {
     fn compress(&self, _command: &str, output: &str) -> String {
         compress_playwright(output)
     }
+
+    fn matches_output(&self, output: &str) -> bool {
+        output
+            .lines()
+            .any(|line| is_playwright_running_signature(line.trim_start()))
+            || looks_like_playwright_json_output(output)
+    }
+}
+
+fn looks_like_playwright_json_output(output: &str) -> bool {
+    let trimmed = output.trim_start();
+    if !trimmed.starts_with('{') {
+        return false;
+    }
+    serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .is_some_and(|value| value.get("stats").is_some() && value.get("suites").is_some())
+}
+
+fn is_playwright_running_signature(trimmed: &str) -> bool {
+    let Some(rest) = trimmed.strip_prefix("Running ") else {
+        return false;
+    };
+    let mut parts = rest.split_whitespace();
+    let Some(test_count) = parts.next() else {
+        return false;
+    };
+    if test_count.parse::<usize>().is_err() {
+        return false;
+    }
+    if !matches!(parts.next(), Some("test" | "tests")) {
+        return false;
+    }
+    if parts.next() != Some("using") {
+        return false;
+    }
+    let Some(worker_count) = parts.next() else {
+        return false;
+    };
+    if worker_count.parse::<usize>().is_err() {
+        return false;
+    }
+    matches!(parts.next(), Some("worker" | "workers"))
 }
 
 fn compress_playwright(output: &str) -> String {
@@ -294,7 +337,7 @@ fn is_summary_line(trimmed: &str) -> bool {
 }
 
 fn parse_running_line(trimmed: &str) -> Option<(usize, Option<String>)> {
-    if !trimmed.starts_with("Running ") || !trimmed.contains(" tests") {
+    if !is_playwright_running_signature(trimmed) {
         return None;
     }
     let count = trimmed

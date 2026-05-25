@@ -13,6 +13,24 @@ impl Compressor for PrettierCompressor {
     fn compress(&self, _command: &str, output: &str) -> String {
         compress_prettier(output)
     }
+
+    fn matches_output(&self, output: &str) -> bool {
+        looks_like_prettier_check_output(output)
+    }
+}
+
+fn looks_like_prettier_check_output(output: &str) -> bool {
+    let mut has_checking = false;
+    let mut has_warn = false;
+    for line in output.lines() {
+        let trimmed = line.trim_start();
+        has_checking |= trimmed == "Checking formatting...";
+        has_warn |= trimmed.starts_with("[warn] ");
+        if trimmed.starts_with("Code style issues found") {
+            return true;
+        }
+    }
+    has_checking && has_warn
 }
 
 fn compress_prettier(output: &str) -> String {

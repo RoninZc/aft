@@ -14,6 +14,16 @@ impl Compressor for PytestCompressor {
     fn compress(&self, _command: &str, output: &str) -> String {
         compress_pytest(output)
     }
+
+    fn matches_output(&self, output: &str) -> bool {
+        output.lines().any(|line| {
+            let trimmed = line.trim();
+            is_section_header(trimmed, "FAILURES")
+                || is_section_header(trimmed, "ERRORS")
+                || is_section_header(trimmed, "short test summary info")
+                || is_pytest_final_summary_signature(trimmed)
+        })
+    }
 }
 
 fn compress_pytest(output: &str) -> String {
@@ -97,6 +107,29 @@ fn is_pass_status_line(trimmed: &str) -> bool {
             .all(|char| matches!(char, '.' | 's' | 'x' | 'X'))
             || trimmed.ends_with(" PASSED")
             || trimmed.contains(" PASSED "))
+}
+
+fn is_pytest_final_summary_signature(trimmed: &str) -> bool {
+    if !trimmed.starts_with('=') || !trimmed.ends_with('=') {
+        return false;
+    }
+    let body = trimmed.trim_matches('=').trim();
+    let has_status = body
+        .split(|ch: char| !ch.is_ascii_alphabetic())
+        .any(|word| matches!(word, "passed" | "failed" | "error" | "errors"));
+    if !has_status {
+        return false;
+    }
+    let Some((_, after_in)) = body.rsplit_once(" in ") else {
+        return false;
+    };
+    let Some(duration) = after_in.split_whitespace().next() else {
+        return false;
+    };
+    let Some(seconds) = duration.strip_suffix('s') else {
+        return false;
+    };
+    !seconds.is_empty() && seconds.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
 }
 
 fn is_final_summary(trimmed: &str) -> bool {

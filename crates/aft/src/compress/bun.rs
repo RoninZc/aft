@@ -25,35 +25,17 @@ impl Compressor for BunCompressor {
             Some("install" | "i" | "add" | "remove") => compress_package(output),
             Some("test") => compress_test(output),
             Some("build") => compress_build(output),
-            // `bun run <script>` and bare `bun` invocations: agents commonly
-            // run `bun run --cwd packages/foo test` where the package's
-            // `test` script calls `bun test` underneath. The command head
-            // says "run", but the output is bun-test shaped. Without this
-            // peek the generic compressor middle-truncates the `(fail) ...`
-            // blocks and the agent has to re-run with grep to see which
-            // tests failed — a frustration that bites every CI debug loop.
-            // We detect bun-test output by looking for its signature summary
-            // line, which is short, deterministic, and not produced by
-            // anything else bun emits.
-            Some("run") | _ if looks_like_bun_test_output(output) => compress_test(output),
             _ => GenericCompressor::compress_output(output),
         }
     }
-}
 
-/// Detect bun-test output by looking for its summary line shape:
-///   `Ran N tests across N files. [...]`
-///
-/// This is the bun-test footer regardless of pass/fail and regardless of
-/// how the test runner was invoked (`bun test`, `bun run test`, scripts
-/// that shell out, etc.). We don't match on `(pass)`/`(fail)` markers
-/// alone because well-behaved test fixtures can emit those strings in
-/// non-test contexts; the `Ran N tests across N files.` summary is
-/// effectively a private bun-test marker.
-fn looks_like_bun_test_output(output: &str) -> bool {
-    output
-        .lines()
-        .any(|line| line.trim_start().starts_with("Ran ") && line.contains(" tests across "))
+    fn matches_output(&self, output: &str) -> bool {
+        output.lines().any(is_ran_summary_line)
+    }
+
+    fn compress_output_match(&self, output: &str) -> String {
+        compress_test(output)
+    }
 }
 
 /// Known bun subcommands we want to match on. Used by `bun_subcommand`
@@ -379,10 +361,22 @@ fn is_bun_test_code_pointer(line: &str) -> bool {
 /// emits to mark the end of its own output. Accepts both the singular
 /// (`file. [`) and plural (`files. [`) forms.
 fn is_ran_summary_line(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    trimmed.starts_with("Ran ")
-        && trimmed.contains(" tests")
-        && (trimmed.contains(" files. [") || trimmed.contains(" file. ["))
+    let Some(rest) = line.strip_prefix("Ran ") else {
+        return false;
+    };
+    let Some((test_count, rest)) = rest.split_once(" tests across ") else {
+        return false;
+    };
+    if test_count.is_empty() || !test_count.chars().all(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+    let Some((file_count, rest)) = rest.split_once(" file") else {
+        return false;
+    };
+    if file_count.is_empty() || !file_count.chars().all(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+    rest.starts_with(". [") || rest.starts_with("s. [")
 }
 
 fn is_summary_line(line: &str) -> bool {
@@ -390,7 +384,7 @@ fn is_summary_line(line: &str) -> bool {
     // Summary lines come after `[N]ms` markers in counts. Catch:
     //   " N pass", " N fail", " N expect() calls"
     //   "Ran N tests across N files. [Xms]"
-    if trimmed.starts_with("Ran ") && trimmed.contains(" tests") {
+    if is_ran_summary_line(trimmed) {
         return true;
     }
     if let Some(first_token) = trimmed.split_whitespace().next() {

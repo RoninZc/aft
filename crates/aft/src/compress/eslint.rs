@@ -27,6 +27,31 @@ impl Compressor for EslintCompressor {
     fn compress(&self, _command: &str, output: &str) -> String {
         compress_eslint(output)
     }
+
+    fn matches_output(&self, output: &str) -> bool {
+        output
+            .lines()
+            .any(|line| is_summary_line(line.trim_start()))
+            || looks_like_eslint_json_output(output)
+    }
+}
+
+fn looks_like_eslint_json_output(output: &str) -> bool {
+    let trimmed = output.trim_start();
+    if !trimmed.starts_with('[') {
+        return false;
+    }
+
+    serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .is_some_and(|value| {
+            value.as_array().is_some_and(|files| {
+                !files.is_empty()
+                    && files.iter().any(|file| {
+                        file.get("filePath").is_some() && file.get("messages").is_some()
+                    })
+            })
+        })
 }
 
 fn compress_eslint(output: &str) -> String {

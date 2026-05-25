@@ -18,6 +18,20 @@ impl Compressor for CargoCompressor {
             _ => GenericCompressor::compress_output(output),
         }
     }
+
+    fn matches_output(&self, output: &str) -> bool {
+        output.lines().any(is_cargo_test_signature_line)
+    }
+
+    fn compress_output_match(&self, output: &str) -> String {
+        compress_test(output)
+    }
+}
+
+fn is_cargo_test_signature_line(line: &str) -> bool {
+    line.starts_with("test result:")
+        || line.starts_with("failures:")
+        || (line.starts_with("---- ") && line.ends_with(" stdout ----"))
 }
 
 fn cargo_subcommand(command: &str) -> Option<String> {

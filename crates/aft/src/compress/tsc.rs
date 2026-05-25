@@ -12,6 +12,12 @@ impl Compressor for TscCompressor {
     fn compress(&self, _command: &str, output: &str) -> String {
         compress_tsc(output)
     }
+
+    fn matches_output(&self, output: &str) -> bool {
+        output
+            .lines()
+            .any(|line| is_tsc_error_line(line) || is_tsc_top_level_error_line(line))
+    }
 }
 
 fn compress_tsc(output: &str) -> String {

@@ -18,6 +18,49 @@ impl Compressor for RuffCompressor {
     fn compress(&self, _command: &str, output: &str) -> String {
         compress_ruff(output)
     }
+
+    fn matches_output(&self, output: &str) -> bool {
+        looks_like_ruff_clean_output(output)
+            || looks_like_ruff_text_output(output)
+            || looks_like_ruff_json_output(output)
+    }
+}
+
+fn looks_like_ruff_clean_output(output: &str) -> bool {
+    output
+        .lines()
+        .any(|line| line.trim() == "All checks passed!")
+}
+
+fn looks_like_ruff_text_output(output: &str) -> bool {
+    let mut has_violation = false;
+    let mut has_summary = false;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        has_violation |= is_violation_line(trimmed);
+        has_summary |= is_ruff_error_summary_line(trimmed);
+    }
+    has_violation && has_summary
+}
+
+fn looks_like_ruff_json_output(output: &str) -> bool {
+    let trimmed = output.trim_start();
+    if !trimmed.starts_with('[') {
+        return false;
+    }
+
+    serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .is_some_and(|value| {
+            value.as_array().is_some_and(|diagnostics| {
+                !diagnostics.is_empty()
+                    && diagnostics.iter().any(|diagnostic| {
+                        diagnostic.get("code").is_some()
+                            && diagnostic.get("filename").is_some()
+                            && diagnostic.get("location").is_some()
+                    })
+            })
+        })
 }
 
 fn compress_ruff(output: &str) -> String {
@@ -136,8 +179,20 @@ fn is_rule_code(token: &str) -> bool {
     chars.next().is_some_and(|ch| ch.is_ascii_uppercase()) && chars.any(|ch| ch.is_ascii_digit())
 }
 
+fn is_ruff_error_summary_line(trimmed: &str) -> bool {
+    let Some(rest) = trimmed.strip_prefix("Found ") else {
+        return false;
+    };
+    let Some((count, rest)) = rest.split_once(' ') else {
+        return false;
+    };
+    !count.is_empty()
+        && count.chars().all(|ch| ch.is_ascii_digit())
+        && (rest.starts_with("error.") || rest.starts_with("errors."))
+}
+
 fn is_summary_line(trimmed: &str) -> bool {
-    trimmed.starts_with("Found ") && trimmed.contains(" error")
+    is_ruff_error_summary_line(trimmed)
 }
 
 fn string_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
