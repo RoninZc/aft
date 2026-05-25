@@ -104,7 +104,8 @@ describe("Desktop notification session routing", () => {
 
   test("session-less feature announcements persist only after queued delivery", async () => {
     const storageDir = createStorageDir();
-    const versionFile = join(storageDir, "last_announced_version");
+    // L7 storage commit moved this file under <storageDir>/opencode/.
+    const versionFile = join(storageDir, "opencode", "last_announced_version");
     const { client, messages } = createClient();
 
     await sendFeatureAnnouncement(
