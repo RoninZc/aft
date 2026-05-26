@@ -555,19 +555,23 @@ mod tests {
     use crate::protocol::DEFAULT_SESSION_ID;
     use std::fs;
 
-    fn temp_file(name: &str, content: &str) -> PathBuf {
-        // Per-test-name + per-process subdirectory so parallel test threads (and
-        // re-runs that overlap with stale state) never share the same file
-        // path. Previously every test used /tmp/aft_checkpoint_tests/<name>,
-        // which caused sessions_isolate_checkpoint_names to flake under
-        // `cargo test --release` parallel execution.
-        let dir = std::env::temp_dir()
-            .join("aft_checkpoint_tests")
-            .join(format!("{}-{}", std::process::id(), name));
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(name);
+    fn temp_file(name: &str, content: &str) -> (PathBuf, tempfile::TempDir) {
+        let dir = tempfile::Builder::new()
+            .prefix("aft_checkpoint_tests_")
+            .tempdir()
+            .expect("create checkpoint temp dir");
+        let path = dir.path().join(name);
         fs::write(&path, content).unwrap();
-        path
+        (path, dir)
+    }
+
+    fn checkpoint_store() -> (CheckpointStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("checkpoint.lock");
+        (
+            CheckpointStore::with_lock_path(lock_path, CHECKPOINT_LOCK_TIMEOUT),
+            dir,
+        )
     }
 
     fn checkpoint_file(content: &str) -> CheckpointFile {
@@ -578,11 +582,11 @@ mod tests {
 
     #[test]
     fn create_and_restore_round_trip() {
-        let path1 = temp_file("cp_rt1.txt", "hello");
-        let path2 = temp_file("cp_rt2.txt", "world");
+        let (path1, _dir1) = temp_file("cp_rt1.txt", "hello");
+        let (path2, _dir2) = temp_file("cp_rt2.txt", "world");
 
         let backup_store = BackupStore::new();
-        let mut store = CheckpointStore::new();
+        let (mut store, _store_dir) = checkpoint_store();
 
         let info = store
             .create(
@@ -608,9 +612,9 @@ mod tests {
 
     #[test]
     fn overwrite_existing_name() {
-        let path = temp_file("cp_overwrite.txt", "v1");
+        let (path, _dir) = temp_file("cp_overwrite.txt", "v1");
         let backup_store = BackupStore::new();
-        let mut store = CheckpointStore::new();
+        let (mut store, _store_dir) = checkpoint_store();
 
         store
             .create(DEFAULT_SESSION_ID, "dup", vec![path.clone()], &backup_store)
@@ -628,9 +632,9 @@ mod tests {
 
     #[test]
     fn list_returns_metadata_scoped_to_session() {
-        let path = temp_file("cp_list.txt", "data");
+        let (path, _dir) = temp_file("cp_list.txt", "data");
         let backup_store = BackupStore::new();
-        let mut store = CheckpointStore::new();
+        let (mut store, _store_dir) = checkpoint_store();
 
         store
             .create(DEFAULT_SESSION_ID, "a", vec![path.clone()], &backup_store)
@@ -656,10 +660,10 @@ mod tests {
     #[test]
     fn sessions_isolate_checkpoint_names() {
         // Same checkpoint name in two sessions does not collide on restore.
-        let path_a = temp_file("cp_isolated_a.txt", "a-original");
-        let path_b = temp_file("cp_isolated_b.txt", "b-original");
+        let (path_a, _dir_a) = temp_file("cp_isolated_a.txt", "a-original");
+        let (path_b, _dir_b) = temp_file("cp_isolated_b.txt", "b-original");
         let backup_store = BackupStore::new();
-        let mut store = CheckpointStore::new();
+        let (mut store, _store_dir) = checkpoint_store();
 
         // Both sessions create a checkpoint with the same name but different files.
         store
@@ -686,9 +690,9 @@ mod tests {
 
     #[test]
     fn cleanup_removes_expired_across_sessions() {
-        let path = temp_file("cp_cleanup.txt", "data");
+        let (path, _dir) = temp_file("cp_cleanup.txt", "data");
         let backup_store = BackupStore::new();
-        let mut store = CheckpointStore::new();
+        let (mut store, _store_dir) = checkpoint_store();
 
         store
             .create(
@@ -722,7 +726,7 @@ mod tests {
 
     #[test]
     fn restore_nonexistent_returns_error() {
-        let store = CheckpointStore::new();
+        let (store, _store_dir) = checkpoint_store();
         let result = store.restore(DEFAULT_SESSION_ID, "nope");
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -736,9 +740,9 @@ mod tests {
     #[test]
     fn restore_nonexistent_in_other_session_returns_error() {
         // A "snap" that exists in session A must NOT be visible from session B.
-        let path = temp_file("cp_cross_session.txt", "data");
+        let (path, _dir) = temp_file("cp_cross_session.txt", "data");
         let backup_store = BackupStore::new();
-        let mut store = CheckpointStore::new();
+        let (mut store, _store_dir) = checkpoint_store();
         store
             .create("session_a", "only_a", vec![path], &backup_store)
             .unwrap();
@@ -752,8 +756,8 @@ mod tests {
         // file list. Before the fix, the stale backup-tracked entry caused
         // the whole checkpoint to fail on the missing path. Now the checkpoint
         // succeeds with the readable file and reports the skipped one.
-        let readable = temp_file("cp_skip_readable.txt", "still_here");
-        let deleted = temp_file("cp_skip_deleted.txt", "about_to_vanish");
+        let (readable, _readable_dir) = temp_file("cp_skip_readable.txt", "still_here");
+        let (deleted, _deleted_dir) = temp_file("cp_skip_deleted.txt", "about_to_vanish");
 
         // Backup store canonicalizes keys, so the skipped path in the
         // checkpoint result is the canonical form, not the raw temp path.
@@ -769,7 +773,7 @@ mod tests {
 
         fs::remove_file(&deleted).unwrap();
 
-        let mut store = CheckpointStore::new();
+        let (mut store, _store_dir) = checkpoint_store();
         let info = store
             .create(DEFAULT_SESSION_ID, "partial", vec![], &backup_store)
             .expect("checkpoint should succeed despite one missing file");
@@ -783,12 +787,11 @@ mod tests {
     fn create_with_explicit_single_missing_file_errors() {
         // When the caller names a single file explicitly and it can't be read,
         // fail loudly — an empty checkpoint isn't what the caller asked for.
-        let missing = std::env::temp_dir()
-            .join("aft_checkpoint_tests/cp_explicit_missing_does_not_exist.txt");
-        let _ = fs::remove_file(&missing);
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("cp_explicit_missing_does_not_exist.txt");
 
         let backup_store = BackupStore::new();
-        let mut store = CheckpointStore::new();
+        let (mut store, _store_dir) = checkpoint_store();
         let result = store.create(
             DEFAULT_SESSION_ID,
             "explicit",
@@ -810,12 +813,12 @@ mod tests {
         // Explicit file list with one readable + one missing: keep the
         // readable one in the checkpoint, report the missing one under
         // `skipped` instead of failing outright.
-        let good = temp_file("cp_mixed_good.txt", "ok");
-        let missing = std::env::temp_dir().join("aft_checkpoint_tests/cp_mixed_missing.txt");
-        let _ = fs::remove_file(&missing);
+        let (good, _good_dir) = temp_file("cp_mixed_good.txt", "ok");
+        let missing_dir = tempfile::tempdir().unwrap();
+        let missing = missing_dir.path().join("cp_mixed_missing.txt");
 
         let backup_store = BackupStore::new();
-        let mut store = CheckpointStore::new();
+        let (mut store, _store_dir) = checkpoint_store();
         let info = store
             .create(
                 DEFAULT_SESSION_ID,
@@ -831,13 +834,13 @@ mod tests {
 
     #[test]
     fn create_with_empty_files_uses_backup_tracked() {
-        let path = temp_file("cp_tracked.txt", "tracked_content");
+        let (path, _dir) = temp_file("cp_tracked.txt", "tracked_content");
         let mut backup_store = BackupStore::new();
         backup_store
             .snapshot(DEFAULT_SESSION_ID, &path, "auto")
             .unwrap();
 
-        let mut store = CheckpointStore::new();
+        let (mut store, _store_dir) = checkpoint_store();
         let info = store
             .create(DEFAULT_SESSION_ID, "from_tracked", vec![], &backup_store)
             .unwrap();
@@ -857,7 +860,7 @@ mod tests {
         fs::write(&path, "original nested content").unwrap();
 
         let backup_store = BackupStore::new();
-        let mut store = CheckpointStore::new();
+        let (mut store, _store_dir) = checkpoint_store();
         store
             .create(
                 DEFAULT_SESSION_ID,
@@ -888,7 +891,7 @@ mod tests {
         fs::write(&path_b, "checkpoint-b").unwrap();
 
         let backup_store = BackupStore::new();
-        let mut store = CheckpointStore::new();
+        let (mut store, _store_dir) = checkpoint_store();
         store
             .create(
                 DEFAULT_SESSION_ID,
@@ -969,7 +972,7 @@ mod tests {
         fs::set_permissions(&path, original_permissions).unwrap();
 
         let backup_store = BackupStore::new();
-        let mut store = CheckpointStore::new();
+        let (mut store, _store_dir) = checkpoint_store();
         store
             .create(
                 DEFAULT_SESSION_ID,
@@ -1001,7 +1004,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
         let backup_store = BackupStore::new();
-        let mut store = CheckpointStore::new();
+        let (mut store, _store_dir) = checkpoint_store();
         store
             .create(
                 DEFAULT_SESSION_ID,
