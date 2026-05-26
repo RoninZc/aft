@@ -1,9 +1,10 @@
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { formatZoomText } from "@cortexkit/aft-bridge";
-import type { ToolDefinition } from "@opencode-ai/plugin";
+import type { ToolContext, ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import type { PluginContext } from "../types.js";
 import { callBridge, optionalInt } from "./_shared.js";
+import { assertExternalDirectoryPermission, permissionDeniedResponse } from "./permissions.js";
 
 const z = tool.schema;
 
@@ -59,35 +60,44 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
             if (target.length === 0) {
               throw new Error("'target' must be a non-empty string or array of strings");
             }
+            const permissionDenied = await assertOutlineFilesExternalPermissions(context, target);
+            if (permissionDenied) return permissionDeniedResponse(permissionDenied);
+
             const response = await callBridge(ctx, context, "outline", { target, files: true });
             if (response.success === false) {
               throw new Error((response.message as string) || "outline failed");
             }
-            return formatOutlineText(response);
+            return formatOutlineFilesText(response);
           }
 
           if (typeof target !== "string" || target.length === 0) {
             throw new Error("'target' must be a non-empty string or array of strings");
           }
 
+          const resolvedPath = resolve(context.directory, target);
+          const permissionDenied = await assertOutlineFilesExternalPermissions(
+            context,
+            resolvedPath,
+          );
+          if (permissionDenied) return permissionDeniedResponse(permissionDenied);
+
           let isDirectory = false;
           try {
             const { stat } = await import("node:fs/promises");
-            const resolved = resolve(context.directory, target);
-            const st = await stat(resolved);
+            const st = await stat(resolvedPath);
             isDirectory = st.isDirectory();
           } catch {
             // Let Rust report missing paths with its structured error shape.
           }
 
           const params = isDirectory
-            ? { directory: resolve(context.directory, target), files: true }
+            ? { directory: resolvedPath, files: true }
             : { file: target, files: true };
           const response = await callBridge(ctx, context, "outline", params);
           if (response.success === false) {
             throw new Error((response.message as string) || "outline failed");
           }
-          return formatOutlineText(response);
+          return formatOutlineFilesText(response);
         }
 
         // URL mode: pass through to Rust; Rust fetches, validates, and caches.
@@ -264,6 +274,29 @@ interface SkippedOutlineFile {
   reason: string;
 }
 
+const MAX_UNCHECKED_FILES_IN_FOOTER = 10;
+
+async function assertOutlineFilesExternalPermissions(
+  context: ToolContext,
+  target: string | string[],
+): Promise<string | undefined> {
+  const targets = Array.isArray(target) ? target : [target];
+  const checkedParents = new Set<string>();
+
+  for (const rawTarget of targets) {
+    if (typeof rawTarget !== "string" || rawTarget.length === 0) continue;
+    const resolvedPath = resolve(context.directory, rawTarget);
+    const parentDir = dirname(resolvedPath);
+    if (checkedParents.has(parentDir)) continue;
+    checkedParents.add(parentDir);
+
+    const denial = await assertExternalDirectoryPermission(context, resolvedPath);
+    if (denial) return denial;
+  }
+
+  return undefined;
+}
+
 function formatOutlineText(response: Record<string, unknown>): string {
   const text = (response.text as string | undefined) ?? "";
   const skipped = response.skipped_files as SkippedOutlineFile[] | undefined;
@@ -273,4 +306,49 @@ function formatOutlineText(response: Record<string, unknown>): string {
   const lines = skipped.map(({ file, reason }) => `  ${file} — ${reason}`).join("\n");
   const header = text.length > 0 ? `${text}\n\n` : "";
   return `${header}Skipped ${skipped.length} file(s):\n${lines}`;
+}
+
+export function formatOutlineFilesText(response: Record<string, unknown>): string {
+  const text = formatOutlineText(response);
+  const uncheckedFiles = Array.isArray(response.unchecked_files)
+    ? response.unchecked_files.filter(
+        (file): file is string => typeof file === "string" && file.length > 0,
+      )
+    : [];
+  const isPartial =
+    response.complete === false || response.walk_truncated === true || uncheckedFiles.length > 0;
+
+  if (!isPartial) {
+    return text;
+  }
+
+  const footer: string[] = [];
+  if (response.walk_truncated === true) {
+    const uncheckedCount = uncheckedFiles.length;
+    const suffix =
+      uncheckedCount > 0
+        ? ` ${uncheckedCount} additional files in this directory were not indexed.`
+        : " Some files in this directory were not indexed.";
+    footer.push(`⚠ Partial result: walk truncated at 200 files.${suffix}`);
+  } else {
+    const suffix =
+      uncheckedFiles.length > 0
+        ? ` ${uncheckedFiles.length} files in this directory were not indexed.`
+        : " Some files in this directory were not indexed.";
+    footer.push(`⚠ Partial result:${suffix}`);
+  }
+
+  if (uncheckedFiles.length > 0) {
+    footer.push("Unchecked files:");
+    footer.push(
+      ...uncheckedFiles.slice(0, MAX_UNCHECKED_FILES_IN_FOOTER).map((file) => `  ${file}`),
+    );
+    const remaining = uncheckedFiles.length - MAX_UNCHECKED_FILES_IN_FOOTER;
+    if (remaining > 0) {
+      footer.push(`  ... +${remaining} more`);
+    }
+  }
+
+  const header = text.length > 0 ? `${text}\n\n` : "";
+  return `${header}${footer.join("\n")}`;
 }

@@ -61,6 +61,36 @@ describe("reading tool adapters", () => {
     expect(calls[0].params).toEqual({ file: "src/missing.ts" });
   });
 
+  test("aft_outline files:true appends a walk-cap footer after the file table", async () => {
+    const root = await tempProject();
+    await mkdir(join(root, "src"));
+    const uncheckedFiles = Array.from({ length: 12 }, (_, index) => `src/overflow-${index + 1}.ts`);
+    const { api, tools } = makeMockApi();
+    const { bridge, calls } = makeMockBridge(() => ({
+      success: true,
+      text: "path | language | symbols",
+      complete: false,
+      walk_truncated: true,
+      unchecked_files: uncheckedFiles,
+    }));
+    registerReadingTools(api, makePluginContext(bridge), { outline: true, zoom: false });
+
+    const result = (await executeTool(tools.get("aft_outline")!, { target: "src", files: true }, {
+      cwd: root,
+    } as never)) as { content: Array<{ text: string }> };
+
+    expect(calls[0].params).toEqual({ directory: join(root, "src"), files: true });
+    expect(result.content[0].text).toContain("path | language | symbols");
+    expect(result.content[0].text).toContain(
+      "⚠ Partial result: walk truncated at 200 files. 12 additional files in this directory were not indexed.",
+    );
+    expect(result.content[0].text).toContain("Unchecked files:");
+    expect(result.content[0].text).toContain("src/overflow-1.ts");
+    expect(result.content[0].text).toContain("src/overflow-10.ts");
+    expect(result.content[0].text).not.toContain("src/overflow-11.ts");
+    expect(result.content[0].text).toContain("... +2 more");
+  });
+
   test("aft_zoom maps contextLines to each batched symbol request and preserves failures", async () => {
     const root = await tempProject();
     await writeFile(join(root, "src.ts"), "export function ok() {}\n");

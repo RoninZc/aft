@@ -276,7 +276,7 @@ export function registerReadingTools(
             if (response.success === false) {
               throw new Error((response.message as string) || "outline failed");
             }
-            return textResult(formatOutlineText(response), response);
+            return textResult(formatOutlineFilesText(response), response);
           }
 
           if (typeof target !== "string" || target.length === 0) {
@@ -299,7 +299,7 @@ export function registerReadingTools(
           if (response.success === false) {
             throw new Error((response.message as string) || "outline failed");
           }
-          return textResult(formatOutlineText(response), response);
+          return textResult(formatOutlineFilesText(response), response);
         }
 
         // URL mode: pass through to Rust; Rust fetches, validates, and caches.
@@ -481,6 +481,8 @@ interface SkippedOutlineFile {
   reason: string;
 }
 
+const MAX_UNCHECKED_FILES_IN_FOOTER = 10;
+
 function formatOutlineText(response: Record<string, unknown>): string {
   const text = (response.text as string | undefined) ?? "";
   const skipped = response.skipped_files as SkippedOutlineFile[] | undefined;
@@ -490,4 +492,49 @@ function formatOutlineText(response: Record<string, unknown>): string {
   const lines = skipped.map(({ file, reason }) => `  ${file} — ${reason}`).join("\n");
   const header = text.length > 0 ? `${text}\n\n` : "";
   return `${header}Skipped ${skipped.length} file(s):\n${lines}`;
+}
+
+export function formatOutlineFilesText(response: Record<string, unknown>): string {
+  const text = formatOutlineText(response);
+  const uncheckedFiles = Array.isArray(response.unchecked_files)
+    ? response.unchecked_files.filter(
+        (file): file is string => typeof file === "string" && file.length > 0,
+      )
+    : [];
+  const isPartial =
+    response.complete === false || response.walk_truncated === true || uncheckedFiles.length > 0;
+
+  if (!isPartial) {
+    return text;
+  }
+
+  const footer: string[] = [];
+  if (response.walk_truncated === true) {
+    const uncheckedCount = uncheckedFiles.length;
+    const suffix =
+      uncheckedCount > 0
+        ? ` ${uncheckedCount} additional files in this directory were not indexed.`
+        : " Some files in this directory were not indexed.";
+    footer.push(`⚠ Partial result: walk truncated at 200 files.${suffix}`);
+  } else {
+    const suffix =
+      uncheckedFiles.length > 0
+        ? ` ${uncheckedFiles.length} files in this directory were not indexed.`
+        : " Some files in this directory were not indexed.";
+    footer.push(`⚠ Partial result:${suffix}`);
+  }
+
+  if (uncheckedFiles.length > 0) {
+    footer.push("Unchecked files:");
+    footer.push(
+      ...uncheckedFiles.slice(0, MAX_UNCHECKED_FILES_IN_FOOTER).map((file) => `  ${file}`),
+    );
+    const remaining = uncheckedFiles.length - MAX_UNCHECKED_FILES_IN_FOOTER;
+    if (remaining > 0) {
+      footer.push(`  ... +${remaining} more`);
+    }
+  }
+
+  const header = text.length > 0 ? `${text}\n\n` : "";
+  return `${header}${footer.join("\n")}`;
 }
