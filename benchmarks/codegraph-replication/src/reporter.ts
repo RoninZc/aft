@@ -38,7 +38,7 @@ export function writeReports(
   const stem = `${report.driver}-${report.corpus}-${stamp}`;
   const jsonPath = join(outDir, `${stem}.json`);
   const markdownPath = join(outDir, `${stem}.md`);
-  writeFileSync(jsonPath, JSON.stringify(report, null, 2) + "\n");
+  writeFileSync(jsonPath, `${JSON.stringify(report, null, 2)}\n`);
   writeFileSync(markdownPath, markdownSummary(report));
   return { jsonPath, markdownPath };
 }

@@ -51,10 +51,7 @@
   },
   "overrides": [
     {
-      "includes": [
-        "**/__tests__/**",
-        "**/*.test.ts"
-      ],
+      "includes": ["**/__tests__/**", "**/*.test.ts"],
       "linter": {
         "rules": {
           "suspicious": {
@@ -67,9 +64,7 @@
       }
     },
     {
-      "includes": [
-        "**/*.d.ts"
-      ],
+      "includes": ["**/*.d.ts"],
       "linter": {
         "rules": {
           "suspicious": {
@@ -79,9 +74,7 @@
       }
     },
     {
-      "includes": [
-        "**/tui/**/*.tsx"
-      ],
+      "includes": ["**/tui/**/*.tsx"],
       "linter": {
         "rules": {
           "suspicious": {
