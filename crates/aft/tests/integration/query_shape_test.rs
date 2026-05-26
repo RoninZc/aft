@@ -31,6 +31,7 @@ fn weights(kind: QueryKind) -> ShapeWeights {
         QueryKind::Mixed => "how does useState work",
         QueryKind::ErrorCode => "ERR_TIMEOUT",
         QueryKind::Path => "src/lib.rs",
+        QueryKind::Regex => "^export",
         QueryKind::NaturalLanguage => "how does auth work",
     })
     .weights
@@ -43,7 +44,6 @@ fn classifies_identifier_queries() {
         "useState",
         "aft_safety_history",
         "LSPManager",
-        "foo.bar",
         "subagent_type",
         "getCurrentWorkingDirectory",
         "SearchIndex",
@@ -68,6 +68,7 @@ fn classifies_path_queries_before_error_or_identifier_patterns() {
         "src/ERR_TIMEOUT.rs",
         "/tmp/E1234.log",
         "./foo/bar.json",
+        "foo.bar",
     ] {
         assert_shape(query, QueryKind::Path, expected);
     }
@@ -127,6 +128,21 @@ fn classifies_mixed_queries() {
 }
 
 #[test]
+fn classifies_regex_queries() {
+    let expected = weights(QueryKind::Regex);
+    for query in [
+        "^export",
+        "foo$",
+        r"foo\.bar",
+        "[a-z]+",
+        "foo|bar",
+        "(?:foo)",
+    ] {
+        assert_shape(query, QueryKind::Regex, expected);
+    }
+}
+
+#[test]
 fn weights_are_stable_by_shape() {
     assert_weights(
         weights(QueryKind::Identifier),
@@ -168,5 +184,14 @@ fn weights_are_stable_by_shape() {
             should_use_lexical: true,
         },
         "mixed",
+    );
+    assert_weights(
+        weights(QueryKind::Regex),
+        ShapeWeights {
+            semantic: 0.0,
+            lexical: 1.0,
+            should_use_lexical: false,
+        },
+        "regex",
     );
 }

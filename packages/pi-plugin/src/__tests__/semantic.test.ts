@@ -9,7 +9,7 @@ import { registerSemanticTool } from "../tools/semantic.js";
 import { executeTool, makeMockApi, makeMockBridge, makePluginContext } from "./tool-test-utils.js";
 
 describe("aft_search adapter", () => {
-  test("maps topK to top_k and surfaces bridge text directly", async () => {
+  test("maps topK and hint to bridge params and surfaces bridge text directly", async () => {
     const { api, tools } = makeMockApi();
     const { bridge, calls } = makeMockBridge(() => ({ success: true, text: "ready results" }));
     registerSemanticTool(api, makePluginContext(bridge));
@@ -17,10 +17,11 @@ describe("aft_search adapter", () => {
     const result = (await executeTool(tools.get("aft_search")!, {
       query: "retry logic",
       topK: 7,
+      hint: "literal",
     })) as { content: Array<{ text: string }> };
 
     expect(calls[0].command).toBe("semantic_search");
-    expect(calls[0].params).toEqual({ query: "retry logic", top_k: 7 });
+    expect(calls[0].params).toEqual({ query: "retry logic", top_k: 7, hint: "literal" });
     expect(result.content[0].text).toBe("ready results");
   });
 

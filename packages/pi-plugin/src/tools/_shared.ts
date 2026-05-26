@@ -45,7 +45,7 @@ export const LONG_RUNNING_COMMAND_TIMEOUT_MS: Record<string, number> = {
   impact: 60_000,
   grep: 60_000,
   glob: 60_000,
-  semantic_search: 45_000,
+  semantic_search: 60_000,
 };
 
 /** Returns the per-command timeout override, or undefined to use the bridge default. */

@@ -1,13 +1,14 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::env;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
 use crate::context::{AppContext, SemanticIndexStatus};
+use crate::grep_executor::{self, GrepParams};
+use crate::pattern_compile::{self, CompileOpts, CompileResult};
 use crate::protocol::{RawRequest, Response};
 use crate::query_shape::{self, QueryKind, QueryShape};
-use crate::search_index::SearchIndex;
+use crate::search_index::{GrepMatch, GrepResult, SearchIndex};
 use crate::semantic_index::{
     is_onnx_runtime_unavailable, is_semantic_indexed_extension, EmbeddingModel, SemanticResult,
 };
@@ -17,6 +18,7 @@ const DEFAULT_TOP_K: usize = 10;
 const MAX_TOP_K: usize = 100;
 const HYBRID_LEXICAL_BOOST: f32 = 1.1;
 const LEXICAL_ONLY_SCORE_CEILING: f32 = 0.25;
+const LEXICAL_ENUMERATION_LIMIT: usize = 50;
 
 #[derive(Debug, Clone)]
 pub struct HybridResult {
@@ -33,11 +35,38 @@ pub struct HybridResult {
     pub snippet: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum SearchHint {
+    Regex,
+    Literal,
+    Semantic,
+    #[default]
+    Auto,
+}
+
 #[derive(Debug, Deserialize)]
 struct SemanticSearchParams {
     query: String,
-    #[serde(default = "default_top_k")]
+    #[serde(default = "default_top_k", alias = "topK")]
     top_k: usize,
+    #[serde(default)]
+    hint: SearchHint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchMode {
+    Regex,
+    Literal,
+    Semantic,
+    Hybrid,
+}
+
+#[derive(Debug, Clone)]
+struct LexicalCollection {
+    files: Vec<(PathBuf, f32)>,
+    ready: bool,
+    engine_capped: bool,
 }
 
 pub fn handle_semantic_search(req: &RawRequest, ctx: &AppContext) -> Response {
@@ -52,70 +81,310 @@ pub fn handle_semantic_search(req: &RawRequest, ctx: &AppContext) -> Response {
         }
     };
 
-    let status = ctx.semantic_index_status().borrow().clone();
-    match &status {
-        SemanticIndexStatus::Disabled => {
-            return Response::success(
+    let top_k = params.top_k.clamp(1, MAX_TOP_K);
+    let project_root = grep_executor::project_root(ctx);
+    let shape = query_shape::classify(&params.query);
+    let semantic_status_snapshot = ctx.semantic_index_status().borrow().clone();
+    let semantic_status = semantic_status_label(&semantic_status_snapshot);
+    let mut warnings = Vec::new();
+
+    let lexical_ready = search_index_ready(ctx);
+    let mode = choose_mode(
+        params.hint,
+        &params.query,
+        &shape,
+        lexical_ready,
+        &mut warnings,
+    );
+
+    match mode {
+        SearchMode::Regex | SearchMode::Literal => handle_grep_search(
+            req,
+            ctx,
+            &params.query,
+            top_k,
+            &shape,
+            mode,
+            semantic_status,
+            warnings,
+            &project_root,
+        ),
+        SearchMode::Semantic | SearchMode::Hybrid => handle_semantic_or_hybrid_search(
+            req,
+            ctx,
+            params,
+            top_k,
+            shape,
+            mode,
+            semantic_status_snapshot,
+            semantic_status,
+            warnings,
+            &project_root,
+        ),
+    }
+}
+
+fn default_top_k() -> usize {
+    DEFAULT_TOP_K
+}
+
+fn choose_mode(
+    hint: SearchHint,
+    query: &str,
+    shape: &QueryShape,
+    lexical_ready: bool,
+    warnings: &mut Vec<String>,
+) -> SearchMode {
+    match hint {
+        SearchHint::Regex => {
+            if shape.kind == QueryKind::NaturalLanguage {
+                warnings.push(
+                    "hint:'regex' was provided for a natural-language-looking query; interpreting it as regex.".to_string(),
+                );
+            }
+            SearchMode::Regex
+        }
+        SearchHint::Literal => {
+            if literal_tokens_all_short(query) {
+                warnings.push(
+                    "Literal query with tokens shorter than 3 chars requires per-file scan; latency may be slow on large repos.".to_string(),
+                );
+            }
+            SearchMode::Literal
+        }
+        SearchHint::Semantic => {
+            if shape.kind == QueryKind::Regex {
+                warnings.push(
+                    "hint:'semantic' was provided for a regex-looking query; skipping lexical/regex matching.".to_string(),
+                );
+            }
+            SearchMode::Semantic
+        }
+        SearchHint::Auto => {
+            if shape.kind == QueryKind::Regex {
+                return SearchMode::Regex;
+            }
+            if shape.kind != QueryKind::NaturalLanguage && extracted_tokens_all_short(query, shape)
+            {
+                warnings.push(
+                    "Auto mode treats all-short exact tokens as semantic search; pass hint:'literal' for exact matching.".to_string(),
+                );
+                return SearchMode::Semantic;
+            }
+            if shape.kind == QueryKind::NaturalLanguage {
+                return SearchMode::Semantic;
+            }
+            if lexical_ready {
+                SearchMode::Hybrid
+            } else {
+                warnings.push(
+                    "Lexical trigram index is unavailable; using semantic search only.".to_string(),
+                );
+                SearchMode::Semantic
+            }
+        }
+    }
+}
+
+fn handle_grep_search(
+    req: &RawRequest,
+    ctx: &AppContext,
+    query: &str,
+    top_k: usize,
+    shape: &QueryShape,
+    mode: SearchMode,
+    semantic_status: &'static str,
+    mut warnings: Vec<String>,
+    project_root: &Path,
+) -> Response {
+    let literal = mode == SearchMode::Literal;
+    let compiled = match pattern_compile::compile(
+        query,
+        CompileOpts {
+            literal,
+            ..CompileOpts::default()
+        },
+    ) {
+        CompileResult::Ok(compiled) => compiled,
+        CompileResult::InvalidPattern { message, .. } => {
+            return Response::error_with_data(
                 &req.id,
-                serde_json::json!({
-                    "status": "disabled",
-                    "text": "Semantic search is not enabled.",
-                }),
+                "invalid_pattern",
+                message,
+                serde_json::json!({"pattern": query}),
+            );
+        }
+        CompileResult::UnsupportedSyntax { feature, .. } => {
+            return Response::error_with_data(
+                &req.id,
+                "unsupported_pattern",
+                format!(
+                    "Pattern uses regex syntax not supported by AFT's engine: {feature}. Use hint:'literal' or rewrite without {feature}."
+                ),
+                serde_json::json!({"pattern": query, "feature": feature}),
+            );
+        }
+    };
+
+    let scope = match grep_executor::resolve_grep_scope(ctx, None, top_k, &req.id) {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
+    let params = GrepParams {
+        include: Vec::new(),
+        exclude: Vec::new(),
+        max_results: top_k,
+    };
+    let result = grep_executor::execute(ctx, &compiled, &scope, &params);
+    if result.fully_degraded {
+        warnings.push(degraded_warning(ctx));
+    }
+
+    let result_values = result
+        .matches
+        .iter()
+        .map(grep_match_to_json)
+        .collect::<Vec<_>>();
+    let interpreted_as = interpreted_as_label(mode);
+    let text = format_grep_search_text(&result, project_root, interpreted_as);
+    search_response(
+        req,
+        SearchResponseParts {
+            query,
+            interpreted_as,
+            query_kind: query_kind_label(shape.kind),
+            semantic_status,
+            status: semantic_status,
+            text,
+            results: result_values,
+            more_available: result.truncated || result.total_matches > result.matches.len(),
+            engine_capped: result.engine_capped,
+            fully_degraded: result.fully_degraded,
+            warnings,
+            extras: serde_json::Map::new(),
+        },
+    )
+}
+
+fn handle_semantic_or_hybrid_search(
+    req: &RawRequest,
+    ctx: &AppContext,
+    params: SemanticSearchParams,
+    top_k: usize,
+    shape: QueryShape,
+    mode: SearchMode,
+    status: SemanticIndexStatus,
+    semantic_status: &'static str,
+    mut warnings: Vec<String>,
+    project_root: &Path,
+) -> Response {
+    let lexical = if mode == SearchMode::Hybrid {
+        collect_lexical_files(ctx, &params.query, &shape)
+    } else {
+        LexicalCollection {
+            files: Vec::new(),
+            ready: search_index_ready(ctx),
+            engine_capped: false,
+        }
+    };
+
+    match status {
+        SemanticIndexStatus::Disabled => {
+            return search_response(
+                req,
+                SearchResponseParts {
+                    query: &params.query,
+                    interpreted_as: interpreted_as_label(mode),
+                    query_kind: query_kind_label(shape.kind),
+                    semantic_status: "disabled",
+                    status: "disabled",
+                    text: "Semantic search is not enabled.".to_string(),
+                    results: Vec::new(),
+                    more_available: false,
+                    engine_capped: lexical.engine_capped,
+                    fully_degraded: false,
+                    warnings,
+                    extras: serde_json::Map::new(),
+                },
             );
         }
         SemanticIndexStatus::Failed(error) => {
-            return semantic_error_response(&req.id, error);
+            if params.hint == SearchHint::Semantic {
+                return semantic_error_response(&req.id, &error);
+            }
+            warnings.push(format!("Semantic search unavailable: {error}"));
+            return search_response(
+                req,
+                SearchResponseParts {
+                    query: &params.query,
+                    interpreted_as: interpreted_as_label(mode),
+                    query_kind: query_kind_label(shape.kind),
+                    semantic_status: "unavailable",
+                    status: "unavailable",
+                    text: format!("Semantic search unavailable: {error}"),
+                    results: Vec::new(),
+                    more_available: false,
+                    engine_capped: lexical.engine_capped,
+                    fully_degraded: false,
+                    warnings,
+                    extras: serde_json::Map::new(),
+                },
+            );
         }
-        SemanticIndexStatus::Building { .. } | SemanticIndexStatus::Ready => {}
-    }
+        SemanticIndexStatus::Building {
+            stage,
+            files,
+            entries_done,
+            entries_total,
+        } => {
+            let mut detail = format!("Semantic index is still building (stage: {}).", stage);
+            if let Some(files) = files {
+                detail.push_str(&format!(" files: {}", files));
+            }
+            if let Some(entries_done) = entries_done {
+                detail.push_str(&format!(" entries done: {}", entries_done));
+            }
+            if let Some(entries_total) = entries_total {
+                detail.push_str(&format!(" / {}", entries_total));
+            }
 
-    let project_root = ctx
-        .config()
-        .project_root
-        .clone()
-        .unwrap_or_else(|| env::current_dir().unwrap_or_default());
-    let project_root = std::fs::canonicalize(&project_root).unwrap_or(project_root);
+            let results = fuse_hybrid_results(Vec::new(), lexical.files, &shape, top_k);
+            let result_values = results.iter().map(result_to_json).collect::<Vec<_>>();
+            let note = building_lexical_note(lexical.ready);
+            let mut extras = serde_json::Map::new();
+            extras.insert("stage".to_string(), serde_json::json!(stage));
+            extras.insert("files".to_string(), serde_json::json!(files));
+            extras.insert("entries_done".to_string(), serde_json::json!(entries_done));
+            extras.insert(
+                "entries_total".to_string(),
+                serde_json::json!(entries_total),
+            );
+            extras.insert("note".to_string(), serde_json::json!(note));
 
-    let shape = query_shape::classify(&params.query);
-    let (lexical_files, lexical_index_ready) = collect_lexical_files(ctx, &params.query, &shape);
-
-    if let SemanticIndexStatus::Building {
-        stage,
-        files,
-        entries_done,
-        entries_total,
-    } = status
-    {
-        let mut detail = format!("Semantic index is still building (stage: {}).", stage);
-        if let Some(files) = files {
-            detail.push_str(&format!(" files: {}", files));
+            return search_response(
+                req,
+                SearchResponseParts {
+                    query: &params.query,
+                    interpreted_as: interpreted_as_label(mode),
+                    query_kind: query_kind_label(shape.kind),
+                    semantic_status: "building",
+                    status: "building",
+                    text: format_building_lexical_text(
+                        &detail,
+                        &results,
+                        project_root,
+                        lexical.ready,
+                    ),
+                    results: result_values,
+                    more_available: false,
+                    engine_capped: lexical.engine_capped,
+                    fully_degraded: false,
+                    warnings,
+                    extras,
+                },
+            );
         }
-        if let Some(entries_done) = entries_done {
-            detail.push_str(&format!(" entries done: {}", entries_done));
-        }
-        if let Some(entries_total) = entries_total {
-            detail.push_str(&format!(" / {}", entries_total));
-        }
-
-        let results = fuse_hybrid_results(
-            Vec::new(),
-            lexical_files,
-            &shape,
-            params.top_k.min(MAX_TOP_K),
-        );
-        return Response::success(
-            &req.id,
-            serde_json::json!({
-                "status": "building",
-                "text": format_building_lexical_text(&detail, &results, &project_root, lexical_index_ready),
-                "stage": stage,
-                "files": files,
-                "entries_done": entries_done,
-                "entries_total": entries_total,
-                "note": building_lexical_note(lexical_index_ready),
-                "results": results.iter().map(result_to_json).collect::<Vec<_>>(),
-            }),
-        );
+        SemanticIndexStatus::Ready => {}
     }
 
     let query_vector = match embed_query(&params.query, ctx) {
@@ -123,26 +392,33 @@ pub fn handle_semantic_search(req: &RawRequest, ctx: &AppContext) -> Response {
         Err(error) => return semantic_error_response(&req.id, &error),
     };
 
+    let semantic_limit = top_k.clamp(50, MAX_TOP_K);
     let semantic_results = {
         let semantic_index = ctx.semantic_index().borrow();
         let Some(index) = semantic_index.as_ref() else {
-            return Response::success(
-                &req.id,
-                serde_json::json!({
-                    "status": "not_ready",
-                    "text": "Semantic index is not ready yet.",
-                }),
+            return search_response(
+                req,
+                SearchResponseParts {
+                    query: &params.query,
+                    interpreted_as: interpreted_as_label(mode),
+                    query_kind: query_kind_label(shape.kind),
+                    semantic_status: "unavailable",
+                    status: "not_ready",
+                    text: "Semantic index is not ready yet.".to_string(),
+                    results: Vec::new(),
+                    more_available: false,
+                    engine_capped: lexical.engine_capped,
+                    fully_degraded: false,
+                    warnings,
+                    extras: serde_json::Map::new(),
+                },
             );
         };
-        index.search(&query_vector, params.top_k.clamp(50, MAX_TOP_K))
+        index.search(&query_vector, semantic_limit)
     };
 
-    let results = fuse_hybrid_results(
-        semantic_results,
-        lexical_files,
-        &shape,
-        params.top_k.min(MAX_TOP_K),
-    );
+    let pre_fuse_count = semantic_results.len().saturating_add(lexical.files.len());
+    let results = fuse_hybrid_results(semantic_results, lexical.files, &shape, top_k);
 
     // No score threshold: silent filtering produced "0 results" even when the
     // model had reasonable matches the agent could have judged. Surface every
@@ -150,41 +426,130 @@ pub fn handle_semantic_search(req: &RawRequest, ctx: &AppContext) -> Response {
 
     *ctx.semantic_index_status().borrow_mut() = SemanticIndexStatus::Ready;
 
-    Response::success(
-        &req.id,
-        serde_json::json!({
-            "status": "ready",
-            "text": format_semantic_text(&results, &project_root),
-            "results": results.iter().map(result_to_json).collect::<Vec<_>>(),
-        }),
+    search_response(
+        req,
+        SearchResponseParts {
+            query: &params.query,
+            interpreted_as: interpreted_as_label(mode),
+            query_kind: query_kind_label(shape.kind),
+            semantic_status,
+            status: "ready",
+            text: format_semantic_text(&results, project_root),
+            results: results.iter().map(result_to_json).collect::<Vec<_>>(),
+            more_available: pre_fuse_count > top_k,
+            engine_capped: lexical.engine_capped,
+            fully_degraded: false,
+            warnings,
+            extras: serde_json::Map::new(),
+        },
     )
 }
 
-fn default_top_k() -> usize {
-    DEFAULT_TOP_K
+struct SearchResponseParts<'a> {
+    query: &'a str,
+    interpreted_as: &'static str,
+    query_kind: &'static str,
+    semantic_status: &'static str,
+    status: &'static str,
+    text: String,
+    results: Vec<serde_json::Value>,
+    more_available: bool,
+    engine_capped: bool,
+    fully_degraded: bool,
+    warnings: Vec<String>,
+    extras: serde_json::Map<String, serde_json::Value>,
 }
 
-fn collect_lexical_files(
-    ctx: &AppContext,
-    query: &str,
-    shape: &QueryShape,
-) -> (Vec<(PathBuf, f32)>, bool) {
+impl<'a> SearchResponseParts<'a> {
+    fn result_count(&self) -> usize {
+        self.results.len()
+    }
+}
+
+fn search_response(req: &RawRequest, parts: SearchResponseParts<'_>) -> Response {
+    let mut object = serde_json::Map::new();
+    object.insert("status".to_string(), serde_json::json!(parts.status));
+    object.insert("text".to_string(), serde_json::json!(parts.text));
+    object.insert("query".to_string(), serde_json::json!(parts.query));
+    object.insert(
+        "interpreted_as".to_string(),
+        serde_json::json!(parts.interpreted_as),
+    );
+    object.insert(
+        "query_kind".to_string(),
+        serde_json::json!(parts.query_kind),
+    );
+    object.insert(
+        "result_count".to_string(),
+        serde_json::json!(parts.result_count()),
+    );
+    object.insert(
+        "results".to_string(),
+        serde_json::Value::Array(parts.results),
+    );
+    object.insert(
+        "more_available".to_string(),
+        serde_json::json!(parts.more_available),
+    );
+    object.insert(
+        "engine_capped".to_string(),
+        serde_json::json!(parts.engine_capped),
+    );
+    object.insert(
+        "fully_degraded".to_string(),
+        serde_json::json!(parts.fully_degraded),
+    );
+    object.insert(
+        "semantic_status".to_string(),
+        serde_json::json!(parts.semantic_status),
+    );
+    if !parts.warnings.is_empty() {
+        object.insert("warnings".to_string(), serde_json::json!(parts.warnings));
+    }
+    for (key, value) in parts.extras {
+        object.insert(key, value);
+    }
+    Response::success(&req.id, serde_json::Value::Object(object))
+}
+
+fn collect_lexical_files(ctx: &AppContext, query: &str, shape: &QueryShape) -> LexicalCollection {
     let search_index = ctx.search_index().borrow();
     let Some(index) = search_index.as_ref().filter(|index| index.ready) else {
-        return (Vec::new(), false);
+        return LexicalCollection {
+            files: Vec::new(),
+            ready: false,
+            engine_capped: false,
+        };
     };
 
     if !shape.weights.should_use_lexical {
-        return (Vec::new(), true);
+        return LexicalCollection {
+            files: Vec::new(),
+            ready: true,
+            engine_capped: false,
+        };
     }
 
     let tokens = query_shape::extract_tokens(query, shape);
     let token_refs = tokens.iter().map(String::as_str).collect::<Vec<_>>();
     let query_trigrams = SearchIndex::query_trigrams_from_tokens(&token_refs);
-    (
-        index.lexical_rank(&query_trigrams, Some(&is_semantic_indexed_extension), 50),
-        true,
-    )
+    let ranked = index.lexical_rank_with_stats(
+        &query_trigrams,
+        Some(&is_semantic_indexed_extension),
+        LEXICAL_ENUMERATION_LIMIT,
+    );
+    LexicalCollection {
+        files: ranked.files,
+        ready: true,
+        engine_capped: ranked.engine_capped,
+    }
+}
+
+fn search_index_ready(ctx: &AppContext) -> bool {
+    ctx.search_index()
+        .borrow()
+        .as_ref()
+        .is_some_and(|index| index.ready)
 }
 
 fn embed_query(query: &str, ctx: &AppContext) -> Result<Vec<f32>, String> {
@@ -331,7 +696,7 @@ fn shape_dependent_lexical_only_weight(shape: &QueryShape) -> f32 {
     match shape.kind {
         QueryKind::Identifier => 0.8,
         QueryKind::Path | QueryKind::ErrorCode | QueryKind::Mixed => 0.5,
-        QueryKind::NaturalLanguage => 0.0,
+        QueryKind::NaturalLanguage | QueryKind::Regex => 0.0,
     }
 }
 
@@ -402,6 +767,15 @@ fn format_semantic_text(results: &[HybridResult], project_root: &Path) -> String
         format_result_sections(results, project_root),
         results.len()
     )
+}
+
+fn format_grep_search_text(
+    result: &GrepResult,
+    project_root: &Path,
+    interpreted_as: &str,
+) -> String {
+    let base = crate::commands::grep::format_grep_text(result, project_root);
+    format!("{base}\n[interpreted_as: {interpreted_as}]")
 }
 
 fn format_result_sections(results: &[HybridResult], project_root: &Path) -> String {
@@ -485,6 +859,17 @@ fn result_to_json(result: &HybridResult) -> serde_json::Value {
     })
 }
 
+fn grep_match_to_json(grep_match: &GrepMatch) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "GrepLine",
+        "file": grep_match.file.display().to_string(),
+        "line": grep_match.line,
+        "column": grep_match.column,
+        "line_text": grep_match.line_text,
+        "match_text": grep_match.match_text,
+    })
+}
+
 fn display_line_number(line: u32) -> u32 {
     line.saturating_add(1)
 }
@@ -502,6 +887,75 @@ fn symbol_kind_label(kind: &SymbolKind) -> &'static str {
         SymbolKind::Heading => "heading",
         SymbolKind::FileSummary => "file-summary",
     }
+}
+
+fn semantic_status_label(status: &SemanticIndexStatus) -> &'static str {
+    match status {
+        SemanticIndexStatus::Ready => "ready",
+        SemanticIndexStatus::Building { .. } => "building",
+        SemanticIndexStatus::Disabled => "disabled",
+        SemanticIndexStatus::Failed(_) => "unavailable",
+    }
+}
+
+fn interpreted_as_label(mode: SearchMode) -> &'static str {
+    match mode {
+        SearchMode::Regex => "regex",
+        SearchMode::Literal => "literal",
+        SearchMode::Semantic => "semantic",
+        SearchMode::Hybrid => "hybrid",
+    }
+}
+
+fn query_kind_label(kind: QueryKind) -> &'static str {
+    match kind {
+        QueryKind::Identifier => "Identifier",
+        QueryKind::Mixed => "Mixed",
+        QueryKind::ErrorCode => "ErrorCode",
+        QueryKind::Path => "Path",
+        QueryKind::Regex => "Regex",
+        QueryKind::NaturalLanguage => "NaturalLanguage",
+    }
+}
+
+fn literal_tokens_all_short(query: &str) -> bool {
+    let tokens = query
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    !tokens.is_empty() && tokens.iter().all(|token| token.len() < 3)
+}
+
+fn extracted_tokens_all_short(query: &str, shape: &QueryShape) -> bool {
+    let tokens = query_shape::extract_tokens(query, shape);
+    !tokens.is_empty() && tokens.iter().all(|token| token.len() < 3)
+}
+
+pub fn humanize_degraded_reasons(reasons: &[String]) -> Vec<String> {
+    reasons.iter().map(|code| humanize_one(code)).collect()
+}
+
+fn humanize_one(code: &str) -> String {
+    if code == "home_root" {
+        return "Project root is set to your home directory; large file-system indexes are disabled to avoid scanning the whole home tree.".into();
+    }
+    if let Some(threshold) = code.strip_prefix("search_too_many_files:") {
+        return format!(
+            "Project source-file count exceeds search_index threshold ({} files); trigram index disabled. Narrow project_root or open a smaller subdirectory.",
+            threshold
+        );
+    }
+    format!("(Degraded: {})", code)
+}
+
+fn degraded_warning(ctx: &AppContext) -> String {
+    let mut text = "Lexical search ran in degraded full-file-scan mode.".to_string();
+    let reasons = ctx.degraded_reasons();
+    if !reasons.is_empty() {
+        text.push_str(" Reasons: ");
+        text.push_str(&humanize_degraded_reasons(&reasons).join("; "));
+    }
+    text
 }
 
 #[cfg(test)]
@@ -522,6 +976,17 @@ mod tests {
             "command": "semantic_search",
             "query": query,
             "top_k": top_k,
+        }))
+        .expect("build semantic search request")
+    }
+
+    fn semantic_request_with_hint(query: &str, top_k: usize, hint: &str) -> RawRequest {
+        serde_json::from_value(serde_json::json!({
+            "id": "semantic-search-test",
+            "command": "semantic_search",
+            "query": query,
+            "top_k": top_k,
+            "hint": hint,
         }))
         .expect("build semantic search request")
     }
@@ -614,6 +1079,8 @@ mod tests {
 
         assert_eq!(response["success"], true);
         assert_eq!(response["status"], "building");
+        assert_eq!(response["semantic_status"], "building");
+        assert_eq!(response["interpreted_as"], "hybrid");
         assert!(response["note"]
             .as_str()
             .expect("note")
@@ -633,6 +1100,83 @@ mod tests {
             }),
             "expected lexical fallback result, got {results:?}"
         );
+    }
+
+    #[test]
+    fn regex_query_runs_without_semantic_index() {
+        let project = tempfile::tempdir().expect("create project dir");
+        let source_file = project.path().join("src/lib.rs");
+        std::fs::create_dir_all(source_file.parent().expect("source parent"))
+            .expect("create source dir");
+        std::fs::write(&source_file, "pub fn exported() {}\n").expect("write source file");
+        let ctx = test_context(project.path());
+        *ctx.semantic_index_status().borrow_mut() = SemanticIndexStatus::Disabled;
+
+        let response = response_value(handle_semantic_search(
+            &semantic_request_with_hint(".*exported", 5, "regex"),
+            &ctx,
+        ));
+
+        assert_eq!(response["success"], true);
+        assert_eq!(response["interpreted_as"], "regex");
+        assert_eq!(response["query_kind"], "Regex");
+        assert_eq!(response["semantic_status"], "disabled");
+        assert_eq!(response["results"][0]["kind"], "GrepLine");
+    }
+
+    #[test]
+    fn literal_hint_short_token_warns_and_runs_grep_line_results() {
+        let project = tempfile::tempdir().expect("create project dir");
+        let source_file = project.path().join("src/lib.rs");
+        std::fs::create_dir_all(source_file.parent().expect("source parent"))
+            .expect("create source dir");
+        std::fs::write(&source_file, "id = 1\n").expect("write source file");
+        let ctx = test_context(project.path());
+
+        let response = response_value(handle_semantic_search(
+            &semantic_request_with_hint("id", 5, "literal"),
+            &ctx,
+        ));
+
+        assert_eq!(response["success"], true);
+        assert_eq!(response["interpreted_as"], "literal");
+        assert!(response["warnings"][0]
+            .as_str()
+            .expect("warning")
+            .contains("shorter than 3"));
+    }
+
+    #[test]
+    fn unsupported_regex_returns_specific_error() {
+        let project = tempfile::tempdir().expect("create project dir");
+        let ctx = test_context(project.path());
+
+        let response = response_value(handle_semantic_search(
+            &semantic_request_with_hint("(?=foo)", 5, "regex"),
+            &ctx,
+        ));
+
+        assert_eq!(response["success"], false);
+        assert_eq!(response["code"], "unsupported_pattern");
+        assert!(response["message"]
+            .as_str()
+            .expect("message")
+            .contains("lookaround"));
+    }
+
+    #[test]
+    fn humanize_degraded_reason_messages() {
+        let reasons = vec![
+            "home_root".to_string(),
+            "search_too_many_files:20000".to_string(),
+            "custom".to_string(),
+        ];
+        let human = humanize_degraded_reasons(&reasons);
+        assert!(human[0].contains("home directory"));
+        assert!(human[1].contains("search_index threshold (20000 files)"));
+        assert!(human[1].contains("Narrow project_root"));
+        assert_eq!(human[2], "(Degraded: custom)");
+        assert!(human.join("; ").contains("; "));
     }
 
     #[test]
@@ -668,6 +1212,7 @@ mod tests {
             "response should not fail: {response:?}"
         );
         assert_eq!(response["status"], "ready");
+        assert_eq!(response["semantic_status"], "ready");
         assert!(response["results"].as_array().expect("results").is_empty());
         handle.join().expect("embedding server thread");
     }

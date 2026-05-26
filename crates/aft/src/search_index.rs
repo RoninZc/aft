@@ -12,11 +12,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
 use rayon::prelude::*;
-use regex::bytes::{Regex, RegexBuilder};
+use regex::bytes::Regex;
 use regex_syntax::hir::{Hir, HirKind};
 
 use crate::cache_freshness::{self, FileFreshness, FreshnessVerdict};
 use crate::fs_lock;
+use crate::pattern_compile::{self, CompileOpts, CompileResult, CompiledPattern, LiteralSearch};
 
 const DEFAULT_MAX_FILE_SIZE: u64 = 1_048_576;
 const CACHE_MAGIC: u32 = 0x3144_4958; // "XID1" little-endian
@@ -66,6 +67,12 @@ pub struct SearchIndex {
     unindexed_files: HashSet<u32>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct LexicalRankResult {
+    pub files: Vec<(PathBuf, f32)>,
+    pub engine_capped: bool,
+}
+
 impl SearchIndex {
     /// Number of indexed files.
     pub fn file_count(&self) -> usize {
@@ -89,8 +96,20 @@ impl SearchIndex {
         candidate_filter: Option<&dyn Fn(&Path) -> bool>,
         max_files: usize,
     ) -> Vec<(PathBuf, f32)> {
+        self.lexical_rank_with_stats(query_trigrams, candidate_filter, max_files)
+            .files
+    }
+
+    /// Score-rank file candidates and report whether candidate enumeration hit
+    /// the internal 200/500 cap before ranking.
+    pub fn lexical_rank_with_stats(
+        &self,
+        query_trigrams: &[u32],
+        candidate_filter: Option<&dyn Fn(&Path) -> bool>,
+        max_files: usize,
+    ) -> LexicalRankResult {
         if query_trigrams.is_empty() || max_files == 0 {
-            return Vec::new();
+            return LexicalRankResult::default();
         }
 
         let mut non_zero: Vec<(u32, usize)> = query_trigrams
@@ -101,7 +120,7 @@ impl SearchIndex {
             })
             .collect();
         if non_zero.is_empty() {
-            return Vec::new();
+            return LexicalRankResult::default();
         }
 
         non_zero.sort_unstable_by_key(|(_, posting_count)| *posting_count);
@@ -118,6 +137,7 @@ impl SearchIndex {
                 }
             }
         }
+        let engine_capped = candidate_ids.len() > candidate_cap;
 
         let mut ranked = Vec::new();
         for file_id in candidate_ids.into_iter().take(candidate_cap) {
@@ -137,7 +157,10 @@ impl SearchIndex {
 
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         ranked.truncate(max_files);
-        ranked
+        LexicalRankResult {
+            files: ranked,
+            engine_capped,
+        }
     }
 }
 
@@ -173,6 +196,8 @@ pub struct GrepResult {
     pub files_with_matches: usize,
     pub index_status: IndexStatus,
     pub truncated: bool,
+    pub fully_degraded: bool,
+    pub engine_capped: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -180,6 +205,7 @@ pub enum IndexStatus {
     Ready,
     Building,
     Fallback,
+    Disabled,
 }
 
 impl IndexStatus {
@@ -188,6 +214,7 @@ impl IndexStatus {
             IndexStatus::Ready => "Ready",
             IndexStatus::Building => "Building",
             IndexStatus::Fallback => "Fallback",
+            IndexStatus::Disabled => "Disabled",
         }
     }
 }
@@ -237,12 +264,6 @@ struct SharedGrepMatch {
 enum SearchMatcher {
     Literal(LiteralSearch),
     Regex(Regex),
-}
-
-#[derive(Clone, Debug)]
-enum LiteralSearch {
-    CaseSensitive(Vec<u8>),
-    AsciiCaseInsensitive(Vec<u8>),
 }
 
 impl SearchIndex {
@@ -392,90 +413,33 @@ impl SearchIndex {
         search_root: &Path,
         max_results: usize,
     ) -> GrepResult {
-        self.search_grep(
+        match pattern_compile::compile(
             pattern,
-            case_sensitive,
-            include,
-            exclude,
-            search_root,
-            max_results,
-        )
+            CompileOpts {
+                case_insensitive: !case_sensitive,
+                ..CompileOpts::default()
+            },
+        ) {
+            CompileResult::Ok(compiled) => {
+                self.search_grep(&compiled, include, exclude, search_root, max_results)
+            }
+            CompileResult::InvalidPattern { .. } | CompileResult::UnsupportedSyntax { .. } => {
+                self.empty_grep_result()
+            }
+        }
     }
 
     pub fn search_grep(
         &self,
-        pattern: &str,
-        case_sensitive: bool,
+        pattern: &CompiledPattern,
         include: &[String],
         exclude: &[String],
         search_root: &Path,
         max_results: usize,
     ) -> GrepResult {
-        // Detect if pattern is a plain literal (no regex metacharacters).
-        // If so, use memchr::memmem which is 3-10x faster than regex for byte scanning.
-        let is_literal = !pattern.chars().any(|c| {
-            matches!(
-                c,
-                '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$' | '\\'
-            )
-        });
-
-        let literal_search = if is_literal {
-            if case_sensitive {
-                Some(LiteralSearch::CaseSensitive(pattern.as_bytes().to_vec()))
-            } else if pattern.is_ascii() {
-                Some(LiteralSearch::AsciiCaseInsensitive(
-                    pattern
-                        .as_bytes()
-                        .iter()
-                        .map(|byte| byte.to_ascii_lowercase())
-                        .collect(),
-                ))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // Build the regex for non-literal patterns (or literal Unicode fallback).
-        let regex = if literal_search.is_some() {
-            None
-        } else {
-            let regex_pattern = if is_literal {
-                regex::escape(pattern)
-            } else {
-                pattern.to_string()
-            };
-            let mut builder = RegexBuilder::new(&regex_pattern);
-            builder.case_insensitive(!case_sensitive);
-            // Treat `^` and `$` as line anchors (grep semantics), not file anchors.
-            builder.multi_line(true);
-            match builder.build() {
-                Ok(r) => Some(r),
-                Err(_) => {
-                    return GrepResult {
-                        matches: Vec::new(),
-                        total_matches: 0,
-                        files_searched: 0,
-                        files_with_matches: 0,
-                        index_status: if self.ready {
-                            IndexStatus::Ready
-                        } else {
-                            IndexStatus::Building
-                        },
-                        truncated: false,
-                    };
-                }
-            }
-        };
-
-        let matcher = if let Some(literal_search) = literal_search {
-            SearchMatcher::Literal(literal_search)
-        } else {
-            SearchMatcher::Regex(
-                regex.expect("regex should exist when literal matcher is unavailable"),
-            )
+        let matcher = match pattern {
+            CompiledPattern::Literal(literal) => SearchMatcher::Literal(literal.clone()),
+            CompiledPattern::Regex { compiled, .. } => SearchMatcher::Regex(compiled.clone()),
         };
 
         let filters = match build_path_filters(include, exclude) {
@@ -484,11 +448,13 @@ impl SearchIndex {
         };
         let search_root = canonicalize_or_normalize(search_root);
 
-        let query = if !case_sensitive && !pattern.is_ascii() {
+        let raw_pattern = pattern.raw_pattern_for_trigrams();
+        let query = if pattern.case_insensitive() && !raw_pattern.is_ascii() {
             RegexQuery::default()
         } else {
-            decompose_regex(pattern)
+            decompose_regex(&raw_pattern)
         };
+        let fully_degraded = query.and_trigrams.is_empty() && query.or_groups.is_empty();
         let candidate_ids = self.candidates(&query);
 
         let candidate_files: Vec<&FileEntry> = candidate_ids
@@ -503,6 +469,7 @@ impl SearchIndex {
         let files_searched = AtomicUsize::new(0);
         let files_with_matches = AtomicUsize::new(0);
         let truncated = AtomicBool::new(false);
+        let engine_capped = AtomicBool::new(false);
         let stop_after = max_results.saturating_mul(2);
 
         let mut matches = if candidate_files.len() > 10 {
@@ -518,6 +485,7 @@ impl SearchIndex {
                         &files_searched,
                         &files_with_matches,
                         &truncated,
+                        &engine_capped,
                     )
                 })
                 .reduce(Vec::new, |mut left, mut right| {
@@ -536,9 +504,11 @@ impl SearchIndex {
                     &files_searched,
                     &files_with_matches,
                     &truncated,
+                    &engine_capped,
                 ));
 
                 if should_stop_search(&truncated, &total_matches, stop_after) {
+                    engine_capped.store(true, Ordering::Relaxed);
                     break;
                 }
             }
@@ -574,6 +544,25 @@ impl SearchIndex {
                 IndexStatus::Building
             },
             truncated: truncated.load(Ordering::Relaxed),
+            fully_degraded,
+            engine_capped: engine_capped.load(Ordering::Relaxed),
+        }
+    }
+
+    fn empty_grep_result(&self) -> GrepResult {
+        GrepResult {
+            matches: Vec::new(),
+            total_matches: 0,
+            files_searched: 0,
+            files_with_matches: 0,
+            index_status: if self.ready {
+                IndexStatus::Ready
+            } else {
+                IndexStatus::Building
+            },
+            truncated: false,
+            fully_degraded: false,
+            engine_capped: false,
         }
     }
 
@@ -1138,8 +1127,10 @@ fn search_candidate_file(
     files_searched: &AtomicUsize,
     files_with_matches: &AtomicUsize,
     truncated: &AtomicBool,
+    engine_capped: &AtomicBool,
 ) -> Vec<SharedGrepMatch> {
     if should_stop_search(truncated, total_matches, stop_after) {
+        engine_capped.store(true, Ordering::Relaxed);
         return Vec::new();
     }
 
@@ -1165,12 +1156,14 @@ fn search_candidate_file(
     let mut matched_this_file = false;
 
     match matcher {
-        SearchMatcher::Literal(LiteralSearch::CaseSensitive(needle)) => {
+        SearchMatcher::Literal(literal) if !literal.case_insensitive_ascii => {
+            let needle = &literal.needle;
             let finder = memchr::memmem::Finder::new(needle);
             let mut start = 0;
 
             while let Some(position) = finder.find(&content[start..]) {
                 if should_stop_search(truncated, total_matches, stop_after) {
+                    engine_capped.store(true, Ordering::Relaxed);
                     break;
                 }
 
@@ -1200,13 +1193,15 @@ fn search_candidate_file(
                 });
             }
         }
-        SearchMatcher::Literal(LiteralSearch::AsciiCaseInsensitive(needle)) => {
+        SearchMatcher::Literal(literal) => {
+            let needle = &literal.needle;
             let search_content = content.to_ascii_lowercase();
             let finder = memchr::memmem::Finder::new(needle);
             let mut start = 0;
 
             while let Some(position) = finder.find(&search_content[start..]) {
                 if should_stop_search(truncated, total_matches, stop_after) {
+                    engine_capped.store(true, Ordering::Relaxed);
                     break;
                 }
 
@@ -1239,6 +1234,7 @@ fn search_candidate_file(
         SearchMatcher::Regex(regex) => {
             for matched in regex.find_iter(&content) {
                 if should_stop_search(truncated, total_matches, stop_after) {
+                    engine_capped.store(true, Ordering::Relaxed);
                     break;
                 }
 
@@ -2371,8 +2367,7 @@ mod tests {
         assert!(refreshed
             .path_to_id
             .contains_key(&canonical_project.join("untracked.txt")));
-        let matches =
-            refreshed.search_grep("after local edit", true, &[], &[], &canonical_project, 10);
+        let matches = refreshed.grep("after local edit", true, &[], &[], &canonical_project, 10);
         assert_eq!(matches.matches.len(), 1);
     }
 
@@ -2547,7 +2542,7 @@ mod tests {
 
         let refreshed =
             SearchIndex::rebuild_or_refresh(&project, DEFAULT_MAX_FILE_SIZE, head, Some(baseline));
-        let result = refreshed.search_grep("newtoken", true, &[], &[], &project, 10);
+        let result = refreshed.grep("newtoken", true, &[], &[], &project, 10);
 
         assert_eq!(result.total_matches, 1);
     }
@@ -2567,7 +2562,7 @@ mod tests {
         assert_eq!(refreshed.file_count(), baseline_file_count);
         assert_eq!(
             refreshed
-                .search_grep("unchangedtoken", true, &[], &[], &project, 10)
+                .grep("unchangedtoken", true, &[], &[], &project, 10)
                 .total_matches,
             1
         );
@@ -2602,7 +2597,7 @@ mod tests {
         fs::write(docs.join("guide.md"), "SearchIndex guide\n").expect("write docs file");
 
         let index = SearchIndex::build(&project);
-        let result = index.search_grep("SearchIndex", true, &[], &[], &src, 10);
+        let result = index.grep("SearchIndex", true, &[], &[], &src, 10);
 
         assert_eq!(result.files_searched, 1);
         assert_eq!(result.files_with_matches, 1);
@@ -2621,7 +2616,7 @@ mod tests {
         fs::write(src.join("main.rs"), "SearchIndex SearchIndex\n").expect("write src file");
 
         let index = SearchIndex::build(&project);
-        let result = index.search_grep("SearchIndex", true, &[], &[], &src, 10);
+        let result = index.grep("SearchIndex", true, &[], &[], &src, 10);
 
         assert_eq!(result.total_matches, 1);
         assert_eq!(result.matches.len(), 1);
@@ -2636,7 +2631,7 @@ mod tests {
         fs::write(&file, "äbc\n").expect("write unicode file");
 
         let index = SearchIndex::build(&project);
-        let result = index.search_grep("Äbc", false, &[], &[], &project, 10);
+        let result = index.grep("Äbc", false, &[], &[], &project, 10);
 
         assert_eq!(result.total_matches, 1);
         assert_eq!(result.matches.len(), 1);
@@ -2662,7 +2657,7 @@ mod tests {
 
         let refreshed =
             SearchIndex::rebuild_or_refresh(&project, DEFAULT_MAX_FILE_SIZE, None, Some(baseline));
-        let result = refreshed.search_grep("bravo", true, &[], &[], &project, 10);
+        let result = refreshed.grep("bravo", true, &[], &[], &project, 10);
         let canonical_file = fs::canonicalize(&file).expect("canonicalize edited file");
         let refreshed_id = *refreshed
             .path_to_id
@@ -2687,7 +2682,7 @@ mod tests {
         fs::write(src.join("main.rs"), "SearchIndex\nSearchIndex\n").expect("write src file");
 
         let index = SearchIndex::build(&project);
-        let result = index.search_grep("SearchIndex", true, &[], &[], &src, 1);
+        let result = index.grep("SearchIndex", true, &[], &[], &src, 1);
 
         assert_eq!(result.total_matches, 2);
         assert_eq!(result.matches.len(), 1);

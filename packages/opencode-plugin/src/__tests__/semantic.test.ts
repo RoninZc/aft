@@ -1,10 +1,10 @@
 /// <reference path="../bun-test.d.ts" />
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import type { BridgePool } from "@cortexkit/aft-bridge";
 import type { ToolContext } from "@opencode-ai/plugin";
 import { semanticTools } from "../tools/semantic.js";
 import type { PluginContext } from "../types.js";
-import { noopAsk } from "./test-helpers";
+import { mockAsk, mockAskDeny, noopAsk } from "./test-helpers";
 
 type BridgeResponse = Record<string, unknown>;
 type SendCall = { command: string; params: Record<string, unknown> };
@@ -30,7 +30,7 @@ function createPluginContext(pool: BridgePool, config: Record<string, unknown>):
   };
 }
 
-function createMockSdkContext(directory = "/tmp/semantic-tests"): ToolContext {
+function createMockSdkContext(directory = "/tmp/semantic-tests", ask = noopAsk): ToolContext {
   return {
     sessionID: "semantic-session",
     messageID: "message-id",
@@ -39,7 +39,7 @@ function createMockSdkContext(directory = "/tmp/semantic-tests"): ToolContext {
     worktree: directory,
     abort: new AbortController().signal,
     metadata: () => {},
-    ask: noopAsk,
+    ask,
   };
 }
 
@@ -121,5 +121,46 @@ describe("semanticTools", () => {
     );
 
     expect(output).toBe("Semantic search unavailable: ONNX Runtime not installed.");
+  });
+
+  test("asks grep permission for regex literal and auto hints but not semantic", async () => {
+    for (const hint of ["regex", "literal", "auto"] as const) {
+      const ask = mockAsk();
+      const sdkCtx = createMockSdkContext("/tmp/project", ask);
+      const { sendCalls, tools } = createMockSemanticHarness({}, () => ({
+        success: true,
+        text: "ok",
+      }));
+
+      await tools.aft_search.execute({ query: "TODO", hint }, sdkCtx);
+
+      expect(ask).toHaveBeenCalledTimes(1);
+      expect(sendCalls[0].params.hint).toBe(hint);
+    }
+
+    const semanticAsk = mockAsk();
+    const semanticCtx = createMockSdkContext("/tmp/project", semanticAsk);
+    const { sendCalls, tools } = createMockSemanticHarness({}, () => ({
+      success: true,
+      text: "ok",
+    }));
+
+    await tools.aft_search.execute({ query: "auth flow", hint: "semantic" }, semanticCtx);
+
+    expect(semanticAsk).not.toHaveBeenCalled();
+    expect(sendCalls[0].params.hint).toBe("semantic");
+  });
+
+  test("permission denied returns an error envelope without bridge call", async () => {
+    const sdkCtx = createMockSdkContext("/tmp/project", mockAskDeny("Denied by policy"));
+    const sendImpl = mock(() => ({ success: true, text: "should not call" }));
+    const { sendCalls, tools } = createMockSemanticHarness({}, sendImpl);
+
+    const output = await tools.aft_search.execute({ query: "TODO", hint: "literal" }, sdkCtx);
+
+    expect(sendCalls).toEqual([]);
+    expect(sendImpl).not.toHaveBeenCalled();
+    expect(output).toContain("permission_denied");
+    expect(output).toContain("Denied by policy");
   });
 });

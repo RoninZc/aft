@@ -1,5 +1,5 @@
 /**
- * aft_search — semantic (embedding-based) code search.
+ * aft_search — unified code search.
  * Only registered when config.semantic_search is enabled AND
  * the ONNX runtime / configured backend is available.
  */
@@ -25,10 +25,23 @@ import {
 const SearchParams = Type.Object({
   query: Type.String({
     description:
-      "Concept or capability to find, phrased as a programmer would describe the code. Examples: 'fuzzy match with whitespace tolerance', 'undo backup before edit', 'retry failed network request'.",
+      "Concept, regex, literal text, filename, or capability to find. Examples: 'fuzzy match with whitespace tolerance', '^export', 'Cargo.lock'.",
   }),
   topK: Type.Optional(
     Type.Number({ description: "Maximum number of results (default: 10, max: 100)" }),
+  ),
+  hint: Type.Optional(
+    Type.Union(
+      [
+        Type.Literal("regex"),
+        Type.Literal("literal"),
+        Type.Literal("semantic"),
+        Type.Literal("auto"),
+      ],
+      {
+        description: "Optional routing hint. Defaults to 'auto'.",
+      },
+    ),
   ),
 });
 
@@ -39,21 +52,31 @@ export function buildSemanticSections(
   theme: Theme,
 ): string[] {
   const response = asRecord(payload);
-  if (!response) return [theme.fg("muted", "No semantic search result.")];
+  if (!response) return [theme.fg("muted", "No search result.")];
 
   const status = asString(response.status) ?? "unknown";
+  const semanticStatus = asString(response.semantic_status) ?? status;
+  const interpretedAs = asString(response.interpreted_as) ?? "unknown";
+  const queryKind = asString(response.query_kind);
   const sections = [
-    `${theme.fg(status === "ready" ? "success" : "warning", `index: ${status}`)} ${theme.fg("muted", `query=${JSON.stringify(args.query)} topK=${args.topK ?? 10}`)}`,
+    `${theme.fg(semanticStatus === "ready" ? "success" : "warning", `semantic: ${semanticStatus}`)} ${theme.fg("muted", `mode=${interpretedAs}${queryKind ? ` kind=${queryKind}` : ""} query=${JSON.stringify(args.query)} topK=${args.topK ?? 10}`)}`,
   ];
 
-  if (status !== "ready") {
+  const warnings = Array.isArray(response.warnings)
+    ? response.warnings.filter((warning): warning is string => typeof warning === "string")
+    : [];
+  if (warnings.length > 0) {
+    sections.push(warnings.map((warning) => theme.fg("warning", `⚠ ${warning}`)).join("\n"));
+  }
+
+  const results = asRecords(response.results);
+  if (status !== "ready" && results.length === 0) {
     sections.push(asString(response.text) ?? theme.fg("muted", "Semantic index is not ready."));
     return sections;
   }
 
-  const results = asRecords(response.results);
   if (results.length === 0) {
-    sections.push(theme.fg("muted", "No semantic matches found."));
+    sections.push(theme.fg("muted", "No matches found."));
     return sections;
   }
 
@@ -61,6 +84,16 @@ export function buildSemanticSections(
   for (const [file, fileResults] of grouped.entries()) {
     const lines = [theme.fg("accent", shortenPath(file))];
     fileResults.forEach((result) => {
+      if (asString(result.kind) === "GrepLine") {
+        const line = asNumber(result.line);
+        const column = asNumber(result.column);
+        const lineText = asString(result.line_text) ?? "";
+        const location =
+          line !== undefined ? `${line}${column !== undefined ? `:${column}` : ""}` : "?";
+        lines.push(`  ↳ ${theme.fg("muted", `line ${location}`)} ${lineText}`);
+        return;
+      }
+
       const score = asNumber(result.score);
       const source = asString(result.source);
       if (source === "lexical") {
@@ -101,7 +134,7 @@ export function renderSemanticCall(
   theme: Theme,
   context: RenderContextLike,
 ) {
-  return renderToolCall("semantic search", theme.fg("toolOutput", args.query), theme, context);
+  return renderToolCall("search", theme.fg("toolOutput", args.query), theme, context);
 }
 
 /** Exported for renderer unit tests. */
@@ -111,7 +144,7 @@ export function renderSemanticResult(
   theme: Theme,
   context: RenderContextLike,
 ) {
-  if (context.isError) return renderErrorResult(result, "semantic search failed", theme, context);
+  if (context.isError) return renderErrorResult(result, "search failed", theme, context);
   return renderSections(
     buildSemanticSections(args, extractStructuredPayload(result), theme),
     context,
@@ -121,23 +154,23 @@ export function renderSemanticResult(
 export function registerSemanticTool(pi: ExtensionAPI, ctx: PluginContext): void {
   pi.registerTool({
     name: "aft_search",
-    label: "semantic search",
+    label: "search",
     description: [
-      "Find symbols by concept using hybrid semantic + lexical search. Returns ranked code matches with similarity scores and provenance tags.",
+      "Find code with unified semantic, lexical, literal, and regex search. Returns ranked symbol/file results or exact matching lines, with routing metadata.",
       "",
       "When to reach for it:",
       "- Exploring an unfamiliar area: 'where is rate limiting handled', 'how does auth flow work'",
       "- Concept doesn't appear as a literal string: 'retry logic', 'cache invalidation', 'graceful shutdown'",
       "- Filename-shaped concepts: 'the bridge spawn helper', 'the session detection module'",
-      "- After 2+ grep attempts that came back empty or noisy",
+      "- Regex-shaped or exact text queries when you want AFT to classify and route automatically",
       "- You know roughly what the function does but not what it's named",
       "",
       "When NOT to use:",
-      "- You have an error message or stack trace → use grep",
+      "- You need exhaustive literal enumeration → use grep directly",
       "- You want the file/module structure → use aft_outline",
       "- You're following a call chain → use aft_navigate",
       "",
-      "Each result tags `source` as one of: 'semantic' (embedding match only), 'lexical' (trigram exact-token match the embedding lane missed), or 'hybrid' (both lanes agreed — strongest signal).",
+      "Set hint to 'regex', 'literal', 'semantic', or 'auto' to override or document routing intent.",
     ].join("\n"),
     parameters: SearchParams,
     async execute(
@@ -150,6 +183,7 @@ export function registerSemanticTool(pi: ExtensionAPI, ctx: PluginContext): void
       const bridge = bridgeFor(ctx, extCtx.cwd);
       const req: Record<string, unknown> = { query: params.query };
       if (params.topK !== undefined) req.top_k = params.topK;
+      if (params.hint !== undefined) req.hint = params.hint;
       const response = await callBridge(bridge, "semantic_search", req, extCtx);
       return textResult((response.text as string | undefined) ?? JSON.stringify(response, null, 2));
     },

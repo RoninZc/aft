@@ -17,7 +17,7 @@ describe("semantic renderer", () => {
         makeContext({ query: "find auth logic", topK: 5 }),
       ),
     );
-    expect(output).toContain("semantic search");
+    expect(output).toContain("search");
     expect(output).toContain("find auth logic");
   });
 
@@ -26,6 +26,9 @@ describe("semantic renderer", () => {
       renderSemanticResult(
         makeResult("", {
           status: "ready",
+          semantic_status: "ready",
+          interpreted_as: "hybrid",
+          query_kind: "Identifier",
           results: [
             {
               file: "/repo/src/auth.ts",
@@ -44,9 +47,38 @@ describe("semantic renderer", () => {
       ),
     );
 
-    expect(output).toContain("index: ready");
+    expect(output).toContain("semantic: ready");
     expect(output).toContain("src/auth.ts");
     expect(output).toContain("login [function] lines 4-8 score 0.910");
+  });
+
+  test("renderSemanticResult renders GrepLine results", () => {
+    const output = renderToString(
+      renderSemanticResult(
+        makeResult("", {
+          status: "ready",
+          semantic_status: "disabled",
+          interpreted_as: "regex",
+          query_kind: "Regex",
+          results: [
+            {
+              kind: "GrepLine",
+              file: "/repo/src/auth.ts",
+              line: 12,
+              column: 5,
+              line_text: "export function login() {}",
+            },
+          ],
+        }),
+        { query: ".*login", topK: 5, hint: "regex" },
+        mockTheme,
+        makeContext({ query: ".*login", topK: 5, hint: "regex" }),
+      ),
+    );
+
+    expect(output).toContain("mode=regex");
+    expect(output).toContain("src/auth.ts");
+    expect(output).toContain("line 12:5 export function login() {}");
   });
 
   test("renderSemanticResult handles non-ready, error, and empty payloads", () => {
@@ -67,7 +99,7 @@ describe("semantic renderer", () => {
       ),
     );
 
-    expect(building).toContain("index: building");
+    expect(building).toContain("semantic: building");
     expect(error).toContain("embedding failed");
   });
 });
