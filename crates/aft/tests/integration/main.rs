@@ -43,6 +43,7 @@ mod hybrid_search_test;
 mod import_test;
 mod inline_symbol_test;
 mod inspect_dead_code_test;
+mod inspect_duplicates_test;
 mod inspect_engine_test;
 mod inspect_metrics_test;
 mod inspect_todos_test;
