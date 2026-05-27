@@ -41,12 +41,11 @@ pub fn handle_inspect(req: &RawRequest, ctx: &AppContext) -> Response {
     let mut outcomes = BTreeMap::new();
     for category in InspectCategory::active() {
         let outcome = if category.is_tier2() {
-            manager.tier2_run_with_reuse(
-                snapshot.clone(),
-                *category,
-                scope.clone(),
-                callgraph_snapshot.clone(),
-            )
+            // Tier 2 (dead_code, unused_exports, duplicates) are NEVER scanned
+            // synchronously here — scans run via aft_inspect_tier2_run on
+            // session.idle. handle_inspect just returns whatever aggregate the
+            // last Tier 2 run persisted, or Pending if nothing is cached yet.
+            manager.tier2_read_cached(snapshot.clone(), *category, scope.clone())
         } else {
             manager.submit_category_with_callgraph(
                 snapshot.clone(),

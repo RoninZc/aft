@@ -184,6 +184,54 @@ impl InspectManager {
         filter_outcome_for_scope(outcome, &caller_scope)
     }
 
+    /// Read-only Tier 2 aggregate lookup for `aft_inspect`. Does NOT run any
+    /// scanner or freshness pass — returns the latest cached aggregate if
+    /// present, otherwise `Pending`. This is the non-blocking variant intended
+    /// for the synchronous `inspect` command path; Tier 2 scans run via
+    /// `tier2_run_with_reuse` triggered by `aft_inspect_tier2_run` on
+    /// `session.idle`.
+    pub fn tier2_read_cached(
+        &self,
+        snapshot: InspectSnapshot,
+        category: InspectCategory,
+        caller_scope: JobScope,
+    ) -> JobOutcome {
+        if !category.is_active() {
+            return JobOutcome::Failed {
+                message: format!("inspect category '{category}' is disabled in v0.33"),
+            };
+        }
+        if !category.is_tier2() {
+            return JobOutcome::Failed {
+                message: format!("inspect category '{category}' is not a Tier 2 category"),
+            };
+        }
+
+        let cache = match self.cache_for_snapshot(&snapshot) {
+            Ok(cache) => cache,
+            Err(message) => return JobOutcome::Failed { message },
+        };
+        let key = JobKey::for_project_category(category);
+        let in_flight = self
+            .in_flight
+            .lock()
+            .map(|guard| guard.contains_key(&key))
+            .unwrap_or(false);
+        match cache.get_aggregated(&key) {
+            Ok(Some(payload)) => filter_outcome_for_scope(
+                JobOutcome::Stale {
+                    cached: Some(payload),
+                    in_flight,
+                },
+                &caller_scope,
+            ),
+            Ok(None) => JobOutcome::Pending { in_flight },
+            Err(error) => JobOutcome::Failed {
+                message: error.to_string(),
+            },
+        }
+    }
+
     #[doc(hidden)]
     pub fn tier2_run_with_reuse_result(
         &self,

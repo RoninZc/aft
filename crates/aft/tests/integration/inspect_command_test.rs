@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aft::commands::configure::handle_configure;
-use aft::commands::inspect::handle_inspect;
+use aft::commands::inspect::{handle_inspect, handle_inspect_tier2_run};
 use aft::config::Config;
 use aft::context::AppContext;
 use aft::parser::TreeSitterProvider;
@@ -56,6 +56,19 @@ fn configured_context(root: &Path) -> AppContext {
 fn inspect(ctx: &AppContext, payload: Value) -> Value {
     let response = handle_inspect(&request(payload), ctx);
     serde_json::to_value(response).expect("inspect response serializes")
+}
+
+fn tier2_run(ctx: &AppContext, categories: &[&str]) {
+    let response = handle_inspect_tier2_run(
+        &request(json!({
+            "id": "tier2-run",
+            "command": "inspect_tier2_run",
+            "categories": categories,
+        })),
+        ctx,
+    );
+    let value = serde_json::to_value(response).expect("tier2_run response serializes");
+    assert_eq!(value["success"], true, "tier2_run failed: {value:#}");
 }
 
 #[test]
@@ -126,6 +139,12 @@ fn inspect_command_dead_code_uses_callgraph_snapshot_and_details() {
     );
     let ctx = configured_context(&root);
 
+    // aft_inspect never scans Tier 2 categories synchronously. Tier 2 scans run
+    // via aft_inspect_tier2_run on session.idle in production. Simulate that
+    // here so the cached aggregate is populated before the read-only inspect
+    // call.
+    tier2_run(&ctx, &["dead_code"]);
+
     let response = inspect(
         &ctx,
         json!({
@@ -151,6 +170,44 @@ fn inspect_command_dead_code_uses_callgraph_snapshot_and_details() {
     assert!(
         details.iter().any(|item| item["symbol"] == "unused"),
         "dead_code details should include unused export: {response:#}"
+    );
+}
+
+#[test]
+fn inspect_command_dead_code_returns_pending_before_tier2_run() {
+    let (_temp_dir, root) = fixture_project();
+    write_file(
+        &root,
+        "src/lib.ts",
+        "export function used() { return 1; }\nexport function unused() { return 2; }\n",
+    );
+    let ctx = configured_context(&root);
+
+    // No tier2_run call — inspect should return Pending for dead_code without
+    // running the scanner synchronously (which would block for seconds on big
+    // projects).
+    let response = inspect(
+        &ctx,
+        json!({
+            "id": "inspect-dead-code-cold",
+            "command": "inspect",
+        }),
+    );
+
+    assert_eq!(response["success"], true, "inspect failed: {response:#}");
+    let pending = response["scanner_state"]["pending_categories"]
+        .as_array()
+        .expect("pending_categories array");
+    assert!(
+        pending.iter().any(|category| category == "dead_code"),
+        "dead_code should be Pending before tier2_run: {response:#}"
+    );
+    let count = response["summary"]["dead_code"]["count"]
+        .as_u64()
+        .expect("dead_code count");
+    assert_eq!(
+        count, 0,
+        "Pending dead_code should report count=0 (no cached aggregate): {response:#}"
     );
 }
 
