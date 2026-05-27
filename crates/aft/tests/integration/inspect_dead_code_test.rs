@@ -85,6 +85,10 @@ fn outbound(root: &Path, caller_file: &str, target: &str, line: u32) -> Callgrap
     }
 }
 
+fn target(root: &Path, file: &str, symbol: &str) -> String {
+    format!("{}::{symbol}", root.join(file).display())
+}
+
 fn scan(job: InspectJob) -> InspectScanSuccess {
     run_dead_code_scan(&job).outcome.expect("scan succeeds")
 }
@@ -97,6 +101,7 @@ fn inspect_dead_code_unavailable_callgraph_returns_empty_result() {
 
     assert!(success.contributions.is_empty());
     assert_eq!(success.aggregate["count"], 0);
+    assert_eq!(success.aggregate["by_language"], json!({}));
     assert_eq!(success.aggregate["callgraph_available"], false);
     assert_eq!(success.aggregate["drill_down_capped"], false);
 }
@@ -115,6 +120,7 @@ fn inspect_dead_code_reports_exported_uncalled_function() {
     let success = scan(job(&root, paths, Some(graph)));
 
     assert_eq!(success.aggregate["count"], 1);
+    assert_eq!(success.aggregate["by_language"]["typescript"], 1);
     assert_eq!(
         success.aggregate["items"].as_array().expect("items").len(),
         1
@@ -126,16 +132,24 @@ fn inspect_dead_code_reports_exported_uncalled_function() {
 }
 
 #[test]
-fn inspect_dead_code_does_not_report_export_called_from_another_file() {
+fn inspect_dead_code_does_not_report_export_reachable_from_entry_point() {
     let (_temp_dir, root, paths) = fixture_project(&[
         ("src/foo.ts", "export function used() {}\n"),
-        ("src/bar.ts", "import { used } from './foo';\nused();\n"),
+        ("src/main.ts", "export function main() {\n  used();\n}\n"),
     ]);
     let graph = snapshot(
         paths.clone(),
-        vec![export(&root, "src/foo.ts", "used", "function", 1)],
-        vec![outbound(&root, "src/bar.ts", "used", 2)],
-        Vec::new(),
+        vec![
+            export(&root, "src/foo.ts", "used", "function", 1),
+            export(&root, "src/main.ts", "main", "function", 1),
+        ],
+        vec![outbound(
+            &root,
+            "src/main.ts",
+            &target(&root, "src/foo.ts", "used"),
+            2,
+        )],
+        vec![root.join("src/main.ts")],
     );
 
     let success = scan(job(&root, paths, Some(graph)));
@@ -145,6 +159,108 @@ fn inspect_dead_code_does_not_report_export_called_from_another_file() {
         .as_array()
         .expect("items")
         .is_empty());
+}
+
+#[test]
+fn inspect_dead_code_keeps_multi_hop_entry_point_reachability_alive() {
+    let (_temp_dir, root, paths) = fixture_project(&[
+        ("src/entry.ts", "export function entry() {\n  b();\n}\n"),
+        ("src/b.ts", "export function b() {\n  c();\n}\n"),
+        ("src/c.ts", "export function c() {}\n"),
+    ]);
+    let graph = snapshot(
+        paths.clone(),
+        vec![
+            export(&root, "src/entry.ts", "entry", "function", 1),
+            export(&root, "src/b.ts", "b", "function", 1),
+            export(&root, "src/c.ts", "c", "function", 1),
+        ],
+        vec![
+            outbound(&root, "src/entry.ts", &target(&root, "src/b.ts", "b"), 2),
+            outbound(&root, "src/b.ts", &target(&root, "src/c.ts", "c"), 2),
+        ],
+        vec![root.join("src/entry.ts")],
+    );
+
+    let success = scan(job(&root, paths, Some(graph)));
+
+    assert_eq!(success.aggregate["count"], 0);
+}
+
+#[test]
+fn inspect_dead_code_keeps_same_name_exports_distinct() {
+    let (_temp_dir, root, paths) = fixture_project(&[
+        ("src/entry.ts", "export function main() {\n  foo();\n}\n"),
+        ("src/dead.ts", "export function foo() {}\n"),
+        ("src/alive.ts", "export function foo() {}\n"),
+    ]);
+    let graph = snapshot(
+        paths.clone(),
+        vec![
+            export(&root, "src/entry.ts", "main", "function", 1),
+            export(&root, "src/dead.ts", "foo", "function", 1),
+            export(&root, "src/alive.ts", "foo", "function", 1),
+        ],
+        vec![outbound(
+            &root,
+            "src/entry.ts",
+            &target(&root, "src/alive.ts", "foo"),
+            2,
+        )],
+        vec![root.join("src/entry.ts")],
+    );
+
+    let success = scan(job(&root, paths, Some(graph)));
+
+    assert_eq!(success.aggregate["count"], 1);
+    assert_eq!(
+        success.aggregate["items"][0],
+        json!({"file": "src/dead.ts", "symbol": "foo", "kind": "function", "line": 1})
+    );
+}
+
+#[test]
+fn inspect_dead_code_reports_unreachable_cycle_exports() {
+    let (_temp_dir, root, paths) = fixture_project(&[
+        ("src/a.ts", "export function a() {\n  b();\n}\n"),
+        ("src/b.ts", "export function b() {\n  a();\n}\n"),
+    ]);
+    let graph = snapshot(
+        paths.clone(),
+        vec![
+            export(&root, "src/a.ts", "a", "function", 1),
+            export(&root, "src/b.ts", "b", "function", 1),
+        ],
+        vec![
+            outbound(&root, "src/a.ts", &target(&root, "src/b.ts", "b"), 2),
+            outbound(&root, "src/b.ts", &target(&root, "src/a.ts", "a"), 2),
+        ],
+        Vec::new(),
+    );
+
+    let success = scan(job(&root, paths, Some(graph)));
+
+    let dead_symbols = success.aggregate["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|item| {
+            (
+                item["file"].as_str().expect("file").to_string(),
+                item["symbol"].as_str().expect("symbol").to_string(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(success.aggregate["count"], 2);
+    assert_eq!(success.aggregate["by_language"]["typescript"], 2);
+    assert_eq!(
+        dead_symbols,
+        BTreeSet::from([
+            ("src/a.ts".to_string(), "a".to_string()),
+            ("src/b.ts".to_string(), "b".to_string()),
+        ])
+    );
 }
 
 #[test]
@@ -183,6 +299,25 @@ fn inspect_dead_code_does_not_report_package_json_main_export() {
 }
 
 #[test]
+fn inspect_dead_code_resolves_extensionless_package_json_main_export() {
+    let (_temp_dir, root, paths) = fixture_project(&[
+        ("package.json", "{\"main\":\"src/index\"}\n"),
+        ("src/index.ts", "export function publicApi() {}\n"),
+    ]);
+    let source_files = vec![root.join("src/index.ts")];
+    let graph = snapshot(
+        source_files,
+        vec![export(&root, "src/index.ts", "publicApi", "function", 1)],
+        Vec::new(),
+        Vec::new(),
+    );
+
+    let success = scan(job(&root, paths, Some(graph)));
+
+    assert_eq!(success.aggregate["count"], 0);
+}
+
+#[test]
 fn inspect_dead_code_caps_drill_down_after_one_hundred_items() {
     let source = (0..101)
         .map(|index| format!("export function unused_{index}() {{}}\n"))
@@ -204,6 +339,7 @@ fn inspect_dead_code_caps_drill_down_after_one_hundred_items() {
     let success = scan(job(&root, paths, Some(graph)));
 
     assert_eq!(success.aggregate["count"], 101);
+    assert_eq!(success.aggregate["by_language"]["typescript"], 101);
     assert_eq!(
         success.aggregate["items"].as_array().expect("items").len(),
         100
@@ -228,7 +364,7 @@ fn inspect_dead_code_contribution_shape_matches_contract() {
             export(&root, "src/bar.ts", "Bar", "function", 1),
         ],
         vec![
-            outbound(&root, "src/foo.ts", "Bar", 2),
+            outbound(&root, "src/foo.ts", &target(&root, "src/bar.ts", "Bar"), 2),
             outbound(&root, "src/foo.ts", "external_dependency", 3),
         ],
         Vec::new(),
@@ -246,11 +382,11 @@ fn inspect_dead_code_contribution_shape_matches_contract() {
         json!({
             "file": "src/foo.ts",
             "exports": [
-                {"symbol": "Foo", "kind": "class", "line": 1},
-                {"symbol": "helper", "kind": "function", "line": 2}
+                {"symbol": "Foo", "kind": "class", "line": 1, "is_entry_point": false},
+                {"symbol": "helper", "kind": "function", "line": 2, "is_entry_point": false}
             ],
             "internal_calls": [
-                {"symbol": "Bar", "line": 2}
+                {"file": "src/bar.ts", "symbol": "Bar", "line": 2}
             ]
         })
     );
