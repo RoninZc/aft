@@ -458,6 +458,15 @@ impl JobOutcome {
     pub fn is_pending(&self) -> bool {
         matches!(self, JobOutcome::Pending { .. })
     }
+
+    pub fn summary_status(&self) -> Option<&'static str> {
+        match self {
+            JobOutcome::Fresh { .. } => None,
+            JobOutcome::Stale { .. } => Some("stale"),
+            JobOutcome::Pending { .. } => Some("pending"),
+            JobOutcome::Failed { .. } => Some("failed"),
+        }
+    }
 }
 
 pub(crate) fn normalize_path(path: &Path) -> PathBuf {

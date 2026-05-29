@@ -71,6 +71,19 @@ function countFrom(summary: Record<string, unknown> | undefined, key: string): n
   return asNumber(section?.count);
 }
 
+function tier2SummaryPart(
+  summary: Record<string, unknown> | undefined,
+  key: string,
+  label: string,
+): string {
+  const section = asRecord(summary?.[key]);
+  const count = asNumber(section?.count);
+  if (count !== undefined) return `${label} ${count}`;
+
+  const status = asString(section?.status);
+  return `${label} ${status ?? "unavailable"}`;
+}
+
 function tier2RefreshCategories(response: Record<string, unknown>): string[] {
   const scannerState = asRecord(response.scanner_state);
   const categories = new Set<string>();
@@ -139,9 +152,9 @@ export function buildInspectSections(payload: unknown, theme: Theme): string[] {
   const parts = [
     `todos ${countFrom(summary, "todos") ?? 0}`,
     `metrics ${asNumber(metrics?.files) ?? 0} files/${asNumber(metrics?.symbols) ?? 0} symbols`,
-    `dead code ${countFrom(summary, "dead_code") ?? 0}`,
-    `unused exports ${countFrom(summary, "unused_exports") ?? 0}`,
-    `duplicates ${countFrom(summary, "duplicates") ?? 0}`,
+    tier2SummaryPart(summary, "dead_code", "dead code"),
+    tier2SummaryPart(summary, "unused_exports", "unused exports"),
+    tier2SummaryPart(summary, "duplicates", "duplicates"),
   ];
 
   const sections = [theme.fg("accent", parts.join(" · "))];
