@@ -137,18 +137,25 @@ impl SearchIndex {
                 }
             }
         }
-        let engine_capped = candidate_ids.len() > candidate_cap;
+        let filtered_candidates = candidate_ids
+            .into_iter()
+            .filter_map(|file_id| {
+                self.files
+                    .get(file_id as usize)
+                    .map(|entry| (file_id, entry))
+            })
+            .filter(|(_, entry)| {
+                if let Some(filter) = candidate_filter {
+                    filter(&entry.path)
+                } else {
+                    true
+                }
+            })
+            .collect::<Vec<_>>();
+        let engine_capped = filtered_candidates.len() > candidate_cap;
 
         let mut ranked = Vec::new();
-        for file_id in candidate_ids.into_iter().take(candidate_cap) {
-            let Some(entry) = self.files.get(file_id as usize) else {
-                continue;
-            };
-            if let Some(filter) = candidate_filter {
-                if !filter(&entry.path) {
-                    continue;
-                }
-            }
+        for (file_id, entry) in filtered_candidates.into_iter().take(candidate_cap) {
             let score = lexical_score(self, query_trigrams, file_id);
             if score > 0.0 {
                 ranked.push((entry.path.clone(), score));

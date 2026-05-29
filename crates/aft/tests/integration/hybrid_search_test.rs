@@ -1,7 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use aft::commands::semantic_search::fuse_hybrid_results;
 use aft::query_shape::classify;
+use aft::search_index::SearchIndex;
 use aft::semantic_index::SemanticResult;
 use aft::symbols::SymbolKind;
 
@@ -133,4 +134,57 @@ fn same_inputs_produce_stable_results() {
     let second = fuse_hybrid_results(semantic_results, lexical, &shape, 10);
 
     assert_eq!(fingerprint(&first), fingerprint(&second));
+}
+
+const LEXICAL_CAP_QUERY: &str = "lexicalcapneedle";
+
+fn code_file_filter(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()) == Some("rs")
+}
+
+fn index_matching_files(index: &mut SearchIndex, extension: &str, start: usize, count: usize) {
+    for offset in 0..count {
+        let file_id = start + offset;
+        let path = PathBuf::from(format!("/project/{extension}/{file_id:03}.{extension}"));
+        index.index_file(&path, LEXICAL_CAP_QUERY.as_bytes());
+    }
+}
+
+#[test]
+fn lexical_candidate_cap_filters_extensions_before_truncating() {
+    let mut index = SearchIndex::new();
+    index_matching_files(&mut index, "lock", 0, 200);
+    index_matching_files(&mut index, "rs", 200, 201);
+
+    let query_trigrams = SearchIndex::query_trigrams_from_tokens(&[LEXICAL_CAP_QUERY]);
+    let result = index.lexical_rank_with_stats(
+        &query_trigrams,
+        Some(&code_file_filter as &dyn Fn(&Path) -> bool),
+        25,
+    );
+
+    assert_eq!(result.files.len(), 25);
+    assert!(result
+        .files
+        .iter()
+        .all(|(path, _)| code_file_filter(path.as_path())));
+    assert!(result.engine_capped);
+}
+
+#[test]
+fn lexical_engine_capped_ignores_filtered_out_candidates() {
+    let mut index = SearchIndex::new();
+    index_matching_files(&mut index, "lock", 0, 201);
+    index_matching_files(&mut index, "rs", 201, 1);
+
+    let query_trigrams = SearchIndex::query_trigrams_from_tokens(&[LEXICAL_CAP_QUERY]);
+    let result = index.lexical_rank_with_stats(
+        &query_trigrams,
+        Some(&code_file_filter as &dyn Fn(&Path) -> bool),
+        10,
+    );
+
+    assert_eq!(result.files.len(), 1);
+    assert!(code_file_filter(result.files[0].0.as_path()));
+    assert!(!result.engine_capped);
 }
