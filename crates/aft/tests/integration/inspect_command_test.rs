@@ -145,6 +145,36 @@ fn scanner_state_contains(response: &Value, key: &str, category: &str) -> bool {
         .any(|value| value == category)
 }
 
+fn assert_summary_status(response: &Value, category: &str, status: &str) {
+    let summary = response["summary"][category]
+        .as_object()
+        .unwrap_or_else(|| panic!("{category} summary object: {response:#}"));
+    assert_eq!(
+        summary.get("status").and_then(Value::as_str),
+        Some(status),
+        "{category} summary should carry status={status}: {response:#}"
+    );
+    assert!(
+        !summary.contains_key("count"),
+        "{category} summary status is not a trusted count: {response:#}"
+    );
+}
+
+fn assert_summary_count(response: &Value, category: &str, count: u64) {
+    let summary = response["summary"][category]
+        .as_object()
+        .unwrap_or_else(|| panic!("{category} summary object: {response:#}"));
+    assert_eq!(
+        summary.get("count").and_then(Value::as_u64),
+        Some(count),
+        "{category} summary should carry count={count}: {response:#}"
+    );
+    assert!(
+        !summary.contains_key("status"),
+        "{category} computed summary should not carry a status sentinel: {response:#}"
+    );
+}
+
 #[test]
 fn inspect_command_todos_summary_uses_production_dispatch() {
     let (_temp_dir, root) = fixture_project();
@@ -196,6 +226,14 @@ fn inspect_command_metrics_summary_uses_production_dispatch() {
         files > 0,
         "metrics scanner should count files: {response:#}"
     );
+    let metrics = response["summary"]["metrics"]
+        .as_object()
+        .expect("metrics summary object");
+    assert!(
+        !metrics.contains_key("status"),
+        "Tier-1 metrics should be computed, not status-only: {response:#}"
+    );
+    assert_summary_count(&response, "todos", 0);
 }
 
 #[cfg(debug_assertions)]
@@ -355,7 +393,7 @@ fn inspect_command_dead_code_uses_callgraph_snapshot_and_details() {
 }
 
 #[test]
-fn inspect_command_dead_code_returns_pending_before_tier2_run() {
+fn inspect_command_tier2_returns_pending_status_before_tier2_run() {
     let (_temp_dir, root) = fixture_project();
     write_file(
         &root,
@@ -364,32 +402,26 @@ fn inspect_command_dead_code_returns_pending_before_tier2_run() {
     );
     let ctx = configured_context(&root);
 
-    // No tier2_run call — inspect should return Pending for dead_code without
-    // running the scanner synchronously (which would block for seconds on big
-    // projects).
+    // No tier2_run call — inspect should return Pending for Tier 2 without
+    // running scanners synchronously (which would block for seconds on big
+    // projects). The summary entry itself must be status-only so agents do not
+    // read an uncomputed category as clean.
     let response = inspect(
         &ctx,
         json!({
-            "id": "inspect-dead-code-cold",
+            "id": "inspect-tier2-cold",
             "command": "inspect",
         }),
     );
 
     assert_eq!(response["success"], true, "inspect failed: {response:#}");
-    let pending = response["scanner_state"]["pending_categories"]
-        .as_array()
-        .expect("pending_categories array");
-    assert!(
-        pending.iter().any(|category| category == "dead_code"),
-        "dead_code should be Pending before tier2_run: {response:#}"
-    );
-    let count = response["summary"]["dead_code"]["count"]
-        .as_u64()
-        .expect("dead_code count");
-    assert_eq!(
-        count, 0,
-        "Pending dead_code should report count=0 (no cached aggregate): {response:#}"
-    );
+    for category in ["dead_code", "unused_exports", "duplicates"] {
+        assert!(
+            scanner_state_contains(&response, "pending_categories", category),
+            "{category} should be Pending before tier2_run: {response:#}"
+        );
+        assert_summary_status(&response, category, "pending");
+    }
 }
 
 #[test]
@@ -446,6 +478,42 @@ export function calculate(input: number) {
   return fifth + second;
 }
 "#
+}
+
+#[test]
+fn inspect_command_computed_tier2_zero_count_stays_count_zero() {
+    let (_temp_dir, root) = fixture_project();
+    write_file(
+        &root,
+        "src/unique.ts",
+        "export function unique(input: number) { return input + 1; }\n",
+    );
+    let ctx = configured_context(&root);
+
+    tier2_run(&ctx, &["duplicates"]);
+    let response = inspect(
+        &ctx,
+        json!({
+            "id": "inspect-duplicates-zero",
+            "command": "inspect",
+        }),
+    );
+
+    assert_eq!(response["success"], true, "inspect failed: {response:#}");
+    assert!(
+        !scanner_state_contains(&response, "pending_categories", "duplicates"),
+        "computed duplicate cache hit must not be pending: {response:#}"
+    );
+    assert!(
+        !scanner_state_contains(&response, "stale_categories", "duplicates"),
+        "computed duplicate cache hit must not be stale: {response:#}"
+    );
+    assert_summary_count(&response, "duplicates", 0);
+    assert_eq!(
+        response["summary"]["duplicates"]["total_groups"].as_u64(),
+        Some(0),
+        "computed zero duplicate summary should keep total_groups=0: {response:#}"
+    );
 }
 
 #[test]
@@ -509,13 +577,7 @@ fn inspect_command_tier2_changed_file_surfaces_stale_category() {
         scanner_state_contains(&response, "stale_categories", "duplicates"),
         "changed duplicate source should mark cached aggregate stale: {response:#}"
     );
-    assert!(
-        response["summary"]["duplicates"]["total_groups"]
-            .as_u64()
-            .unwrap_or(0)
-            > 0,
-        "stale duplicate cache should still expose cached summary: {response:#}"
-    );
+    assert_summary_status(&response, "duplicates", "stale");
 }
 
 fn dead_code_items(response: &Value) -> Vec<(String, String)> {

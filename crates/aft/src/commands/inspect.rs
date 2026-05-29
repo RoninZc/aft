@@ -316,7 +316,7 @@ fn build_inspect_payload(
         let payload = outcome.and_then(JobOutcome::payload);
         summary.insert(
             category.as_str().to_string(),
-            summary_for(*category, payload),
+            summary_for(*category, outcome),
         );
         if sections.includes(*category) {
             details.insert(
@@ -348,7 +348,22 @@ fn build_inspect_payload(
     payload
 }
 
-fn summary_for(category: InspectCategory, payload: Option<&Value>) -> Value {
+fn summary_for(category: InspectCategory, outcome: Option<&JobOutcome>) -> Value {
+    let Some(outcome) = outcome else {
+        return status_summary("pending");
+    };
+    if let Some(status) = outcome.summary_status() {
+        return status_summary(status);
+    }
+
+    computed_summary_for(category, outcome.payload())
+}
+
+fn status_summary(status: &'static str) -> Value {
+    serde_json::json!({ "status": status })
+}
+
+fn computed_summary_for(category: InspectCategory, payload: Option<&Value>) -> Value {
     match category {
         InspectCategory::Diagnostics => serde_json::json!({
             "errors": payload.and_then(|p| p.get("errors")).and_then(Value::as_u64).unwrap_or(0),
@@ -381,7 +396,7 @@ fn summary_for(category: InspectCategory, payload: Option<&Value>) -> Value {
 
 fn details_for(category: InspectCategory, payload: Option<&Value>, top_k: usize) -> Value {
     if category == InspectCategory::Metrics {
-        return summary_for(category, payload);
+        return computed_summary_for(category, payload);
     }
     let Some(payload) = payload else {
         return serde_json::json!([]);
