@@ -157,6 +157,25 @@ describe("aft_inspect tool", () => {
     expect(pending).toContain("typescript-language-server");
     expect(pending).toContain("pyright");
     expect(pending).not.toContain("0 errors");
+
+    // Partial result with counts-so-far AND a pending server: must show BOTH
+    // the already-found counts and the pending signal, so real errors found by
+    // one server aren't hidden while another server is still working.
+    const partial = renderInspectDiagnostics({
+      summary: {
+        diagnostics: {
+          errors: 2,
+          warnings: 0,
+          info: 0,
+          hints: 0,
+          status: "pending",
+          servers_pending: ["oxlint"],
+        },
+      },
+    });
+    expect(partial).toContain("2 errors");
+    expect(partial).toContain("so far");
+    expect(partial).toContain("oxlint");
   });
 
   test("registration gate follows surface, disabled_tools, and inspect.enabled", () => {

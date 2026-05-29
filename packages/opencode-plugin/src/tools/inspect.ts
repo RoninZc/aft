@@ -47,16 +47,28 @@ function formatDiagnosticsSummary(
   const warnings = asNumber(section.warnings);
   const info = asNumber(section.info);
   const hints = asNumber(section.hints);
-  if ([errors, warnings, info, hints].some((value) => value !== undefined)) {
-    return `diagnostics: ${errors ?? 0} errors, ${warnings ?? 0} warnings, ${info ?? 0} info, ${hints ?? 0} hints`;
-  }
-
+  const hasCounts = [errors, warnings, info, hints].some((value) => value !== undefined);
+  const counts = `${errors ?? 0} errors, ${warnings ?? 0} warnings, ${info ?? 0} info, ${hints ?? 0} hints`;
   const status = asString(section.status);
+
+  // Partial result: counts found SO FAR are present alongside a status/gap
+  // signal. Show both — the counts are real (e.g. one server already
+  // reported) and the status tells the agent more may still arrive, so the
+  // counts must not be read as the final/complete picture.
   if (status === "pending") {
-    return `diagnostics: pending (servers: ${diagnosticsServerSummary(section)})`;
+    return hasCounts
+      ? `diagnostics: ${counts} so far — still pending (servers: ${diagnosticsServerSummary(section)})`
+      : `diagnostics: pending (servers: ${diagnosticsServerSummary(section)})`;
   }
   if (status === "incomplete") {
-    return `diagnostics: unavailable (status incomplete; servers: ${diagnosticsServerSummary(section)})`;
+    return hasCounts
+      ? `diagnostics: ${counts} (incomplete — servers: ${diagnosticsServerSummary(section)})`
+      : `diagnostics: unavailable (status incomplete; servers: ${diagnosticsServerSummary(section)})`;
+  }
+
+  // Complete result: counts are the full, trustworthy picture.
+  if (hasCounts) {
+    return `diagnostics: ${counts}`;
   }
 
   return undefined;

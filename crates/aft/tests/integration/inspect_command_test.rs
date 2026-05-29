@@ -1487,13 +1487,19 @@ fn inspect_command_diagnostics_pending_when_no_server_ran() {
 
     assert_eq!(response["success"], true, "inspect failed: {response:#}");
     let summary = response["summary"]["diagnostics"].as_object().unwrap();
+    // New contract: counts-so-far ARE present alongside the pending status.
+    // Honesty comes from the `status` field (not the absence of counts): an
+    // agent seeing `status: pending` knows the counts are not the final picture,
+    // so a 0 here is never misread as "clean".
     assert_eq!(
         summary.get("status").and_then(Value::as_str),
-        Some("pending")
+        Some("pending"),
+        "pending status must be present so counts aren't read as final: {response:#}"
     );
-    assert!(
-        !summary.contains_key("errors"),
-        "pending diagnostics must not be reported as zero-clean: {response:#}"
+    assert_eq!(
+        summary.get("errors").and_then(Value::as_u64),
+        Some(0),
+        "counts-so-far should be present (0 found yet) alongside pending: {response:#}"
     );
     assert!(
         scanner_state_contains(&response, "pending_categories", "diagnostics"),
@@ -1599,9 +1605,12 @@ fn inspect_command_diagnostics_missing_server_is_incomplete_not_zero() {
             .is_some_and(|servers| servers.iter().any(|server| server == "rust")),
         "missing server should be named: {response:#}"
     );
-    assert!(
-        !summary.contains_key("errors"),
-        "incomplete diagnostics must not be reported as zero-clean: {response:#}"
+    // Counts-so-far present alongside the incomplete status (the status flags
+    // that more may exist behind the missing server, so 0 isn't "clean").
+    assert_eq!(
+        summary.get("errors").and_then(Value::as_u64),
+        Some(0),
+        "counts-so-far should accompany incomplete status: {response:#}"
     );
 }
 

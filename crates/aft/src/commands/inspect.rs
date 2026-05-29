@@ -442,11 +442,22 @@ fn diagnostics_summary_for(payload: Option<&Value>) -> Value {
     }
 
     // Public diagnostics summary contract for the plugin layer:
-    //   computed: { errors, warnings, info, hints }
-    //   sentinel: { status: "pending"|"incomplete", servers_pending, servers_not_installed }
-    // A zero count is only emitted in the computed shape, after at least one
-    // server has proven it ran and no server gaps remain.
+    //   complete: { errors, warnings, info, hints }
+    //   partial:  { errors, warnings, info, hints,
+    //               status: "pending"|"incomplete", servers_pending, servers_not_installed }
+    //
+    // The partial shape ALWAYS carries the counts found SO FAR alongside the
+    // status/gap fields. Hiding already-collected diagnostics behind a bare
+    // "pending" sentinel was dishonest the other direction: a scoped pull could
+    // have real errors from one server while another server is still pending,
+    // and an agent reading only the summary would miss them. The presence of
+    // `status` tells the agent the counts are not yet the full picture, so a
+    // `0` count here is never misread as "clean".
     serde_json::json!({
+        "errors": payload.get("errors").and_then(Value::as_u64).unwrap_or(0),
+        "warnings": payload.get("warnings").and_then(Value::as_u64).unwrap_or(0),
+        "info": payload.get("info").and_then(Value::as_u64).unwrap_or(0),
+        "hints": payload.get("hints").and_then(Value::as_u64).unwrap_or(0),
         "status": payload
             .get("status")
             .and_then(Value::as_str)

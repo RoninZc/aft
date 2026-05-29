@@ -88,16 +88,25 @@ function diagnosticsSummaryPart(summary: Record<string, unknown> | undefined): s
   const warnings = asNumber(section.warnings);
   const info = asNumber(section.info);
   const hints = asNumber(section.hints);
-  if ([errors, warnings, info, hints].some((value) => value !== undefined)) {
-    return `diagnostics ${errors ?? 0} errors/${warnings ?? 0} warnings/${info ?? 0} info/${hints ?? 0} hints`;
-  }
-
+  const hasCounts = [errors, warnings, info, hints].some((value) => value !== undefined);
+  const counts = `${errors ?? 0} errors/${warnings ?? 0} warnings/${info ?? 0} info/${hints ?? 0} hints`;
   const status = asString(section.status);
+
+  // Partial result: show counts-so-far alongside the pending/incomplete signal
+  // so already-found diagnostics aren't hidden behind a bare sentinel.
   if (status === "pending") {
-    return `diagnostics pending (servers: ${diagnosticsServerSummary(section)})`;
+    return hasCounts
+      ? `diagnostics ${counts} so far — still pending (servers: ${diagnosticsServerSummary(section)})`
+      : `diagnostics pending (servers: ${diagnosticsServerSummary(section)})`;
   }
   if (status === "incomplete") {
-    return `diagnostics unavailable (status incomplete; servers: ${diagnosticsServerSummary(section)})`;
+    return hasCounts
+      ? `diagnostics ${counts} (incomplete — servers: ${diagnosticsServerSummary(section)})`
+      : `diagnostics unavailable (status incomplete; servers: ${diagnosticsServerSummary(section)})`;
+  }
+
+  if (hasCounts) {
+    return `diagnostics ${counts}`;
   }
 
   return undefined;
