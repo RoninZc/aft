@@ -15,7 +15,26 @@ use crate::lsp::registry::servers_for_file;
 use crate::lsp::roots::ServerKey;
 use crate::lsp::tsconfig_membership::TsconfigMembershipCache;
 
-const INSPECT_DIAGNOSTICS_DEADLINE: Duration = Duration::from_secs(1);
+/// How long a SCOPED diagnostics pull waits for the LSP server to become ready
+/// and publish before reporting `pending`. Only the scoped (active-pull) path
+/// uses this — no-scope warm reads never wait.
+///
+/// 1s was too short for a cold language server: `ensure_server_for_file_detailed`
+/// spawns the server asynchronously, so the first scoped call on a fresh bridge
+/// almost always hit the deadline before the server finished initializing and
+/// returned `pending`, forcing the agent to re-run. When an agent explicitly
+/// scopes to a file it is asking "what's wrong with this" — it should get the
+/// answer in one call. 8s covers typical tsserver/rust-analyzer cold start while
+/// staying well under the 30s bridge transport timeout. The wait is bounded and
+/// only the FIRST scoped call per server pays the cold-start cost (subsequent
+/// calls hit a warm server). Tradeoff: diagnostics run on the single-threaded
+/// dispatch loop (the LSP manager is `!Send`), so this wait blocks other requests
+/// on the same bridge for its duration — acceptable because it is bounded and
+/// cold-start-only. A genuinely slow/unresponsive server still falls back to an
+/// honest `pending` at the deadline. For a directory scope the budget is shared
+/// across files, so the first cold file warms the server and the rest resolve
+/// within the remaining budget (or are reported truncated, honestly).
+const INSPECT_DIAGNOSTICS_DEADLINE: Duration = Duration::from_secs(8);
 const SCOPED_FILE_CAP: usize = 200;
 
 #[derive(Default)]
