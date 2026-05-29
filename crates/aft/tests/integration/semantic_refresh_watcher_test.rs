@@ -20,6 +20,14 @@ struct MockEmbeddingServer {
     base_url: String,
     addr: SocketAddr,
     running: Arc<AtomicBool>,
+    // Gate for the post-edit refresh embedding request. The refresh worker marks
+    // the file "refreshing" BEFORE calling embed and clears it AFTER, so blocking
+    // the embed response holds `refreshing_count == 1` open until the test has
+    // observed it and flips this flag. This makes the transient refreshing state
+    // deterministically observable instead of racing a fixed sleep window — the
+    // old 500ms delay could be missed entirely when the test's polling thread is
+    // starved under full-suite parallel load.
+    release_refresh: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -32,11 +40,13 @@ impl MockEmbeddingServer {
         let addr = listener.local_addr().expect("embedding server addr");
         let running = Arc::new(AtomicBool::new(true));
         let running_for_thread = Arc::clone(&running);
+        let release_refresh = Arc::new(AtomicBool::new(false));
+        let release_for_thread = Arc::clone(&release_refresh);
         let handle = thread::spawn(move || {
             while running_for_thread.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let _ = handle_embedding_request(&mut stream);
+                        let _ = handle_embedding_request(&mut stream, &release_for_thread);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
@@ -50,8 +60,15 @@ impl MockEmbeddingServer {
             base_url: format!("http://{addr}"),
             addr,
             running,
+            release_refresh,
             handle: Some(handle),
         }
+    }
+
+    /// Release the held post-edit refresh embedding request. Call this once the
+    /// test has observed `refreshing_count == 1` so the refresh can complete.
+    fn release_refresh(&self) {
+        self.release_refresh.store(true, Ordering::SeqCst);
     }
 }
 
@@ -65,7 +82,10 @@ impl Drop for MockEmbeddingServer {
     }
 }
 
-fn handle_embedding_request(stream: &mut TcpStream) -> std::io::Result<()> {
+fn handle_embedding_request(
+    stream: &mut TcpStream,
+    release_refresh: &Arc<AtomicBool>,
+) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
@@ -115,7 +135,15 @@ fn handle_embedding_request(stream: &mut TcpStream) -> std::io::Result<()> {
         .iter()
         .any(|input| input.to_ascii_lowercase().contains("after edit refreshed"))
     {
-        thread::sleep(Duration::from_millis(500));
+        // Hold the refresh open until the test observes `refreshing_count == 1`
+        // and releases it (see MockEmbeddingServer::release_refresh). The cap
+        // must exceed the test's observe-and-release latency even under heavy
+        // load (its status round-trips can be starved), so it's generous; it
+        // exists only to avoid wedging if the test panics before releasing.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !release_refresh.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     let data = inputs
@@ -210,8 +238,16 @@ fn wait_for_semantic_status<F>(aft: &mut AftProcess, label: &str, predicate: F) 
 where
     F: Fn(&Value) -> bool,
 {
+    // Generous budget: this e2e test depends on an OS file-watcher event being
+    // delivered to a spawned aft process, then a refresh worker reacting. Under
+    // full-suite parallelism (dozens of concurrent aft processes saturating the
+    // CPU) that pipeline can be starved for several seconds. The loop returns
+    // immediately on match, so a high cap costs nothing on the happy path and
+    // only buys headroom under load. The barrier in the mock embedding server
+    // holds the refreshing window open once the refresh fires, so the only thing
+    // this budget needs to absorb is watcher/worker scheduling latency.
     let mut last_response = None;
-    for _ in 0..150 {
+    for _ in 0..400 {
         let response = status(aft);
         assert_eq!(
             response["success"], true,
@@ -226,6 +262,47 @@ where
 
     panic!(
         "semantic status did not become {label} in time; last response: {:?}",
+        last_response
+    );
+}
+
+/// Like `wait_for_semantic_status`, but re-writes `contents` to `file` on every
+/// poll until `predicate` holds. This defeats FSEvents watcher attach latency:
+/// the recursive watcher comes up asynchronously after configure, so a single
+/// pre-attach write can be missed entirely. Re-emitting the modify event each
+/// iteration guarantees the watcher eventually observes a change once it is
+/// live, without depending on one perfectly-timed write.
+fn wait_for_semantic_status_with_retouch<F>(
+    aft: &mut AftProcess,
+    label: &str,
+    file: &Path,
+    contents: &str,
+    predicate: F,
+) -> Value
+where
+    F: Fn(&Value) -> bool,
+{
+    let mut last_response = None;
+    for i in 0..400 {
+        let response = status(aft);
+        assert_eq!(
+            response["success"], true,
+            "status should succeed while waiting for {label}: {response:?}"
+        );
+        if predicate(&response) {
+            return response;
+        }
+        // Re-touch periodically (not every poll) so we keep emitting modify
+        // events until the watcher attaches, without hammering the filesystem.
+        if i % 3 == 0 {
+            let _ = fs::write(file, contents);
+        }
+        last_response = Some(response);
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    panic!(
+        "semantic status did not become {label} in time (with retouch); last response: {:?}",
         last_response
     );
 }
@@ -302,17 +379,36 @@ fn semantic_refresh_watcher_reindexes_modified_file_and_clears_refreshing() {
     assert_eq!(ready["semantic_index"]["refreshing_count"], 0);
 
     let edited_file = project.path().join("src/b.rs");
-    fs::write(
-        &edited_file,
-        "pub fn edited_refresh_marker() -> &'static str {\n    \"after edit refreshed content\"\n}\n",
-    )
-    .expect("edit watched file");
+    let edited_contents =
+        "pub fn edited_refresh_marker() -> &'static str {\n    \"after edit refreshed content\"\n}\n";
+    fs::write(&edited_file, edited_contents).expect("edit watched file");
 
-    let refreshing = wait_for_semantic_status(&mut aft, "watcher refreshing", |response| {
-        response["semantic_index"]["status"] == "ready"
-            && response["semantic_index"]["refreshing_count"] == 1
-    });
+    // The mock holds the refresh embedding request open, so the file stays in
+    // the "refreshing" set until we release it below — making this transient
+    // state deterministically observable.
+    //
+    // Re-touch on every poll: the recursive FSEvents watcher attaches
+    // asynchronously after configure, so under full-suite parallelism the very
+    // first write can land before the watch is live (or its initial event can
+    // be coalesced/dropped) and the refresh would never fire. Re-writing the
+    // same content each iteration keeps emitting modify events until the watcher
+    // is attached and reacts; once `refreshing_count == 1` the barrier holds it
+    // open so we reliably observe it. This makes the test robust to watcher
+    // attach latency instead of depending on a single well-timed event.
+    let refreshing = wait_for_semantic_status_with_retouch(
+        &mut aft,
+        "watcher refreshing",
+        &edited_file,
+        edited_contents,
+        |response| {
+            response["semantic_index"]["status"] == "ready"
+                && response["semantic_index"]["refreshing_count"] == 1
+        },
+    );
     assert_eq!(refreshing["semantic_index"]["refreshing_count"], 1);
+
+    // Observed the refreshing state; let the refresh complete.
+    server.release_refresh();
 
     let refreshed = wait_for_semantic_status(&mut aft, "refresh completed", |response| {
         response["semantic_index"]["status"] == "ready"
