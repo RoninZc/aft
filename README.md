@@ -42,7 +42,7 @@ AFT gives it the real thing. It sits between an agent's reasoning and your codeb
 
 - **Sensory cortex: perceive.** Outline a file, zoom into one symbol, search by meaning, follow a call graph. The agent sees *structure* instead of scrolling text.
 - **Motor cortex: act.** Edit a function by name, refactor across the workspace, organize imports. Every change is parsed, validated, formatted, and backed up by the binary.
-- **Brainstem: stay alive.** Background bash tasks, PTY sessions, compressed output, and an undo stack keep the agent's environment running without it having to think about it.
+- **Brainstem: stay alive.** Background bash tasks, PTY sessions, and compressed output keep the agent's environment running without it having to think about it. On-demand health checks and an undo stack keep the codebase healthy and recoverable when something does go wrong.
 
 Sensory and motor make the **IDE**; the brainstem is the **OS**. Your agent gets both.
 
