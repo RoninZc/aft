@@ -56,7 +56,7 @@ pub fn handle_organize_imports(req: &RawRequest, ctx: &AppContext) -> Response {
         None => {
             return Response::error(
                 &req.id,
-                "invalid_request",
+                "unsupported_language",
                 format!(
                     "organize_imports: unsupported file extension: {}",
                     path.extension()
@@ -70,7 +70,7 @@ pub fn handle_organize_imports(req: &RawRequest, ctx: &AppContext) -> Response {
     if !imports::is_supported(lang) {
         return Response::error(
             &req.id,
-            "invalid_request",
+            "unsupported_language",
             format!(
                 "organize_imports: import management not yet supported for {:?}",
                 lang

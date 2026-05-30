@@ -79,8 +79,13 @@ export function buildImportSections(
     ];
   }
 
+  const moduleName = asString(response.module) ?? args.module ?? "(module)";
+  const didRemove = response.removed !== false;
+  const removeStatus = didRemove
+    ? `${theme.fg("success", "removed")} ${theme.fg("accent", moduleName)}`
+    : `${theme.fg("warning", "not present")} ${theme.fg("accent", moduleName)}`;
   return [
-    `${theme.fg("success", "removed")} ${theme.fg("accent", asString(response.module) ?? args.module ?? "(module)")}`,
+    removeStatus,
     `${theme.fg("muted", "file")} ${theme.fg("accent", asString(response.file) ?? args.filePath)}`,
     args.removeName
       ? `${theme.fg("muted", "name")} ${args.removeName}`

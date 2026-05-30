@@ -345,7 +345,10 @@ fn add_import_unsupported_language_returns_error() {
         resp["success"], false,
         "should fail for unsupported language"
     );
-    assert_eq!(resp["code"], "invalid_request");
+    assert_eq!(
+        resp["code"], "unsupported_language",
+        "unsupported file type uses the actionable standardized code, not invalid_request"
+    );
 
     fs::remove_file(&file).ok();
     aft.shutdown();

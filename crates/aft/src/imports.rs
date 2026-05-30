@@ -1,10 +1,11 @@
 //! Import analysis engine: parsing, grouping, deduplication, and insertion.
 //!
-//! Provides per-language import handling dispatched by `LangId`. Each language
-//! implementation extracts imports from tree-sitter ASTs, classifies them into
-//! groups, and generates import text.
+//! Per-language behavior is provided by [`ImportSyntax`] implementations,
+//! resolved through the [`syntax_for`] registry. Each engine extracts imports
+//! from tree-sitter ASTs, classifies them into groups, and generates import
+//! text. A single import's structured shape is carried by [`ImportForm`].
 //!
-//! Currently supports: TypeScript, TSX, JavaScript.
+//! Currently supports: TypeScript, TSX, JavaScript, Python, Rust, Go.
 
 use std::ops::Range;
 

@@ -226,7 +226,10 @@ fn vue_unsupported_formatter_and_import_organize_return_clean_errors() {
         organize["success"], false,
         "organize_imports should reject Vue: {organize:?}"
     );
-    assert_eq!(organize["code"], "invalid_request");
+    assert_eq!(
+        organize["code"], "unsupported_language",
+        "Vue import management is unsupported — standardized code, not invalid_request"
+    );
     assert!(
         organize["message"]
             .as_str()

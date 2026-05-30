@@ -71,7 +71,7 @@ pub fn handle_remove_import(req: &RawRequest, ctx: &AppContext) -> Response {
         None => {
             return Response::error(
                 &req.id,
-                "invalid_request",
+                "unsupported_language",
                 format!(
                     "remove_import: unsupported file extension: {}",
                     path.extension()
@@ -85,7 +85,7 @@ pub fn handle_remove_import(req: &RawRequest, ctx: &AppContext) -> Response {
     if !imports::is_supported(lang) {
         return Response::error(
             &req.id,
-            "invalid_request",
+            "unsupported_language",
             format!(
                 "remove_import: import management not yet supported for {:?}",
                 lang
