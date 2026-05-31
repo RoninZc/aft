@@ -891,6 +891,46 @@ fn scenarios() -> Vec<Scenario> {
             input: "local zeta = require(\"zeta\")\nrequire(\"boot\")\nlocal alpha = require(\"alpha\")\n\nreturn alpha, zeta\n",
             ops: &[Op::Organize],
         },
+        // ---- Perl (use/require/no statements with preserved raw args) ----
+        Scenario {
+            name: "perl_add_use",
+            ext: "pl",
+            input: "print \"hi\\n\";\n",
+            ops: &[Op::Add {
+                module: "Foo::Bar",
+                names: &[],
+                default_import: None,
+                type_only: false,
+            }],
+        },
+        Scenario {
+            name: "perl_add_use_qw_args",
+            ext: "pl",
+            input: "print \"hi\\n\";\n",
+            ops: &[Op::AddForm {
+                module: "Foo",
+                names: &[],
+                namespace: None,
+                alias: None,
+                modifiers: &["qw(a b)"],
+                import_kind: Some("use"),
+            }],
+        },
+        Scenario {
+            name: "perl_remove_require",
+            ext: "pl",
+            input: "require Foo::Unused;\nuse Foo::Keep;\n\nprint \"hi\\n\";\n",
+            ops: &[Op::Remove {
+                module: "Foo::Unused",
+                name: None,
+            }],
+        },
+        Scenario {
+            name: "perl_organize_mixed_preserves_kinds_and_args",
+            ext: "pm",
+            input: "require Foo::Runtime;\nuse Foo qw(a b);\nno strict 'refs';\nuse parent -norequire, 'Base';\nuse Foo::Plain;\n\n1;\n",
+            ops: &[Op::Organize],
+        },
     ]
 }
 
