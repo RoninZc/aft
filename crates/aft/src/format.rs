@@ -464,9 +464,12 @@ fn path_lookup_probe_args(command: &str) -> &'static [&'static str] {
 /// Search order is built by `well_known_search_paths`:
 /// 1. `/opt/homebrew/bin` (Apple Silicon Homebrew)
 /// 2. `/usr/local/bin` (Intel Mac Homebrew + most manual Linux installs)
-/// 3. `$HOME/.cargo/bin` (cargo install — rustfmt, etc.)
-/// 4. `$HOME/go/bin` (`go install` default GOPATH layout)
-/// 5. `$HOME/.local/bin` (pip --user, pipx, npm prefix, many shell scripts)
+/// 3. `/usr/local/go/bin` (official go.dev installer)
+/// 4. `/usr/bin` (distro-packaged tools)
+/// 5. `/snap/bin` (snap-packaged tools)
+/// 6. `$HOME/.cargo/bin` (cargo install — rustfmt, etc.)
+/// 7. `$HOME/go/bin` (`go install` default GOPATH layout)
+/// 8. `$HOME/.local/bin` (pip --user, pipx, npm prefix, many shell scripts)
 ///
 /// Each candidate is verified to (a) exist as a regular file and (b) be
 /// executable; we don't spawn `--version` here because spawning an
@@ -495,9 +498,16 @@ fn try_well_known_path_lookup(command: &str) -> Option<PathBuf> {
 /// Extracted so tests can drive the lookup with a controlled HOME without
 /// mutating process-global env vars.
 fn well_known_search_paths(command: &str, home: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::with_capacity(5);
+    let mut candidates: Vec<PathBuf> = Vec::with_capacity(8);
     candidates.push(PathBuf::from("/opt/homebrew/bin").join(command));
     candidates.push(PathBuf::from("/usr/local/bin").join(command));
+    // System/distro install locations a GUI-launched editor's truncated PATH
+    // often misses. /usr/local/go/bin is where the official go.dev installer
+    // puts the Go toolchain (gofmt, go); /snap/bin and /usr/bin cover
+    // distro-packaged installs (Go from apt/snap, etc.).
+    candidates.push(PathBuf::from("/usr/local/go/bin").join(command));
+    candidates.push(PathBuf::from("/usr/bin").join(command));
+    candidates.push(PathBuf::from("/snap/bin").join(command));
     if let Some(home) = home {
         let home_path = PathBuf::from(home);
         candidates.push(home_path.join(".cargo/bin").join(command));
@@ -2967,19 +2977,25 @@ mod tests {
         // tool wins over a HOME-rooted shim.
         assert_eq!(strs[0], "/opt/homebrew/bin/toolx");
         assert_eq!(strs[1], "/usr/local/bin/toolx");
-        assert_eq!(strs[2], "/Users/test-home/.cargo/bin/toolx");
-        assert_eq!(strs[3], "/Users/test-home/go/bin/toolx");
-        assert_eq!(strs[4], "/Users/test-home/.local/bin/toolx");
-        assert_eq!(strs.len(), 5);
+        assert_eq!(strs[2], "/usr/local/go/bin/toolx");
+        assert_eq!(strs[3], "/usr/bin/toolx");
+        assert_eq!(strs[4], "/snap/bin/toolx");
+        assert_eq!(strs[5], "/Users/test-home/.cargo/bin/toolx");
+        assert_eq!(strs[6], "/Users/test-home/go/bin/toolx");
+        assert_eq!(strs[7], "/Users/test-home/.local/bin/toolx");
+        assert_eq!(strs.len(), 8);
     }
 
     #[cfg(unix)]
     #[test]
     fn well_known_search_paths_skips_home_when_unset() {
         let paths = well_known_search_paths("toolx", None);
-        assert_eq!(paths.len(), 2);
+        assert_eq!(paths.len(), 5);
         assert!(paths[0].ends_with("opt/homebrew/bin/toolx"));
         assert!(paths[1].ends_with("usr/local/bin/toolx"));
+        assert!(paths[2].ends_with("usr/local/go/bin/toolx"));
+        assert!(paths[3].ends_with("usr/bin/toolx"));
+        assert!(paths[4].ends_with("snap/bin/toolx"));
     }
 
     #[cfg(unix)]
