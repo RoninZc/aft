@@ -17,6 +17,7 @@ mod csharp;
 mod java;
 mod kotlin;
 mod lua;
+mod perl;
 mod php;
 mod ruby;
 mod scala;
@@ -412,6 +413,7 @@ pub fn syntax_for(lang: LangId) -> Option<&'static dyn ImportSyntax> {
         LangId::Lua => Some(&lua::LUA_SYNTAX),
         LangId::CSharp => Some(&csharp::CSHARP_SYNTAX),
         LangId::Php => Some(&php::PHP_SYNTAX),
+        LangId::Perl => Some(&perl::PERL_SYNTAX),
         LangId::Ruby => Some(&ruby::RUBY_SYNTAX),
         LangId::Scala => Some(&scala::SCALA_SYNTAX),
         LangId::Swift => Some(&swift::SWIFT_SYNTAX),
@@ -421,7 +423,6 @@ pub fn syntax_for(lang: LangId) -> Option<&'static dyn ImportSyntax> {
         | LangId::Bash
         | LangId::Vue
         | LangId::Json
-        | LangId::Perl
         | LangId::Html
         | LangId::Markdown => None,
     }
