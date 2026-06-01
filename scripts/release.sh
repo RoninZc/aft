@@ -217,7 +217,10 @@ if [ "${SKIP_DOCKER_E2E:-}" = "1" ]; then
   echo "  (skipping docker e2e — SKIP_DOCKER_E2E=1)"
 elif command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
   echo "  docker e2e (Linux x64)..."
-  cleanup_fixture() { rm -f tests/docker/fixtures/aft-linux-x64; }
+  cleanup_fixture() {
+    rm -f tests/docker/fixtures/aft-linux-x64
+    rm -rf tests/docker/fixtures/npm-packs
+  }
   trap cleanup_fixture EXIT
   # Build Linux x64 binary in Docker
   docker build --platform linux/amd64 -t aft-build-linux -f tests/docker/Dockerfile.build-linux . --quiet 2>&1 || { echo "Error: Docker Linux build failed"; exit 1; }
@@ -225,12 +228,21 @@ elif command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
   CID=$(docker create --platform linux/amd64 aft-build-linux true)
   docker cp "$CID:/build/target/release/aft" tests/docker/fixtures/aft-linux-x64
   docker rm "$CID" > /dev/null
+  # Pack local plugin artifacts so the E2E image installs the code under test
+  # (real package.json + dist + deps) instead of the published @latest plugin.
+  # The Dockerfile COPYs tests/docker/fixtures/npm-packs/*.tgz; CI does the same
+  # in _e2e-suite.yml. Without this the E2E image build fails on a missing dir.
+  rm -rf tests/docker/fixtures/npm-packs
+  mkdir -p tests/docker/fixtures/npm-packs
+  npm pack ./packages/aft-bridge --pack-destination tests/docker/fixtures/npm-packs >/dev/null 2>&1 || { echo "Error: npm pack aft-bridge failed"; exit 1; }
+  npm pack ./packages/opencode-plugin --pack-destination tests/docker/fixtures/npm-packs >/dev/null 2>&1 || { echo "Error: npm pack opencode-plugin failed"; exit 1; }
   # Build E2E test image
   docker build --platform linux/amd64 -t aft-e2e-linux-x64 -f tests/docker/Dockerfile.linux-x64 . --quiet 2>&1 || { echo "Error: Docker E2E image build failed"; exit 1; }
   # Run E2E test
   docker run --rm --platform linux/amd64 aft-e2e-linux-x64 2>&1 || { echo "Error: Docker E2E tests failed"; exit 1; }
-  # Clean up extracted binary (don't commit it)
+  # Clean up extracted binary + packed tarballs (don't commit them)
   rm -f tests/docker/fixtures/aft-linux-x64
+  rm -rf tests/docker/fixtures/npm-packs
   trap - EXIT
   echo "  ✓ Docker E2E passed"
 else
