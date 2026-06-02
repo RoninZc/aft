@@ -973,6 +973,28 @@ fn handle_single_file_edit_match(
         }
     };
 
+    // Fuzzy passes (rstrip/trim/unicode) are line-based: `find_line_matches`
+    // sets the byte range to include the trailing newline after the last
+    // matched line, even when the user's `oldString` had no trailing newline.
+    // Applying the replacement verbatim over that range drops the newline, so
+    // the last replaced line merges with the following line (#83). Re-append
+    // a newline when the matched range ended in one and the replacement does
+    // not — mirroring batch.rs line-range mode. Gated to fuzzy passes (pass >=
+    // 2); the exact pass (1) matches the needle byte-for-byte, so its trailing
+    // newline behavior reflects exactly what the caller typed.
+    let effective_replacement = |m: &crate::fuzzy_match::FuzzyMatch| -> String {
+        let byte_end = m.byte_start + m.byte_len;
+        let range_has_trailing_nl = m.pass >= 2
+            && byte_end > 0
+            && byte_end <= source.len()
+            && source.as_bytes()[byte_end - 1] == b'\n';
+        if range_has_trailing_nl && !replacement.is_empty() && !replacement.ends_with('\n') {
+            format!("{replacement}\n")
+        } else {
+            replacement.to_string()
+        }
+    };
+
     // Apply edit(s) — use fuzzy match byte lengths (may differ from match_str.len())
     let (new_source, count) = if replace_all {
         let count = fuzzy_matches.len();
@@ -983,7 +1005,7 @@ fn handle_single_file_edit_match(
                 &result,
                 m.byte_start,
                 m.byte_start + m.byte_len,
-                replacement,
+                &effective_replacement(m),
             ) {
                 Ok(updated) => updated,
                 Err(e) => {
@@ -1000,7 +1022,7 @@ fn handle_single_file_edit_match(
                 &source,
                 m.byte_start,
                 m.byte_start + m.byte_len,
-                replacement,
+                &effective_replacement(m),
             ) {
                 Ok(updated) => updated,
                 Err(e) => {

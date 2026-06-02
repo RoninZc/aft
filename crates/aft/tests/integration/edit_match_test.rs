@@ -170,6 +170,51 @@ fn edit_match_omits_syntax_valid_when_language_unsupported() {
     assert!(status.success());
 }
 
+// Regression for #83: a fuzzy (rstrip) match must not drop the trailing
+// newline of the matched range. The fuzzy line matcher includes the newline
+// after the last matched line in its byte range; applying the replacement
+// verbatim used to merge the last replaced line with the following line.
+#[test]
+fn edit_match_fuzzy_preserves_trailing_newline() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("greet.js");
+    // Trailing spaces after two lines force the rstrip fuzzy pass (pass 2),
+    // since the clean `match` below won't match byte-for-byte.
+    fs::write(
+        &file,
+        "function greet(name) {\n  const message = \"Hello, \" + name;   \n  console.log(message);   \n  return message;\n}\n",
+    )
+    .unwrap();
+
+    let mut aft = AftProcess::spawn();
+    let req = json!({
+        "id": "fuzzy-trailing-newline",
+        "command": "edit_match",
+        "file": file,
+        // No trailing spaces in the match (forces fuzzy) and no trailing newline
+        // in the replacement (the bug condition).
+        "match": "  const message = \"Hello, \" + name;\n  console.log(message);\n  return message;",
+        "replacement": "  const msg = \"Hello, \" + name;\n  console.log(msg);\n  return msg;"
+    });
+    let resp = aft.send(&req.to_string());
+    assert_eq!(resp["success"], true, "expected edit success: {resp:?}");
+
+    let after = fs::read_to_string(&file).unwrap();
+    // The newline before `}` must survive — `return msg;` and `}` stay on
+    // separate lines instead of merging into `  return msg;}`.
+    assert!(
+        after.contains("  return msg;\n}"),
+        "trailing newline before closing brace was dropped: {after:?}"
+    );
+    assert!(
+        !after.contains("return msg;}"),
+        "last replaced line merged with the next line: {after:?}"
+    );
+
+    let status = aft.shutdown();
+    assert!(status.success());
+}
+
 #[cfg(unix)]
 fn make_writable(path: &std::path::Path) {
     let mut permissions = fs::metadata(path).unwrap().permissions();
