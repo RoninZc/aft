@@ -184,13 +184,13 @@ const PLUGIN_VERSION: string = (() => {
   }
 })();
 
-const ANNOUNCEMENT_VERSION = "0.34.0";
+const ANNOUNCEMENT_VERSION = "0.35.0";
 const ANNOUNCEMENT_FEATURES: string[] = [
-  "`aft_import` now supports 12 more languages (Solidity, Java, C#, PHP, Kotlin, Scala, Swift, Ruby, Lua, Perl, C/C++, Vue) — 17 total.",
-  "New YAML + Kubernetes/CRD support across outline, zoom, search, and ast_grep.",
-  "`aft_conflicts` takes an optional `path` to inspect any repo or git worktree, and names the repository it checked.",
-  "`.aftignore` (layered on `.gitignore`) plus ripgrep-style `grep` that searches an explicitly-named file even when ignored.",
-  "`aft_zoom` call-graph annotations are now opt-in (`callgraph: true`); `semantic.max_files` and `bash.foreground_wait_window_ms` are configurable.",
+  "New IDE-style status bar on tool results — live LSP errors/warnings plus dead-code, unused-export, duplicate, and TODO counts at a glance.",
+  "`aft_inspect` is more accurate (dead-code reachability, duplicate collapse, ranked findings) and a background scheduler keeps its counts fresh during long sessions.",
+  "The `aft_conflicts` and `grep` bash-output hints now fire on Pi too.",
+  "`npx @cortexkit/aft --version` reports CLI, binary, and per-harness versions; `doctor --issue` can scope its report to a single session.",
+  "New SCSS support and `.inc` files parsed as PHP.",
 ];
 
 /**
