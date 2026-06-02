@@ -527,8 +527,37 @@ fn atomic_write_lock_metadata(path: &Path, metadata: &LockMetadata) -> io::Resul
 
 #[cfg(windows)]
 fn rename_over(from: &Path, to: &Path) -> io::Result<()> {
-    let _ = fs::remove_file(to);
-    fs::rename(from, to)
+    // std::fs::rename on Windows maps to MoveFileExW with
+    // MOVEFILE_REPLACE_EXISTING, which atomically replaces an existing
+    // destination. Try that FIRST: an unconditional `remove_file(to)` before
+    // the rename opens a window where `to` does not exist, and a concurrent
+    // reader (e.g. the heartbeat poll) landing in that gap reads NotFound ->
+    // LockGone (terminal) and kills the heartbeat thread. That race made
+    // heartbeat_survives_transient_malformed_and_recovers flaky on Windows CI.
+    match fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        // Fall back to a copy-over (NOT remove-then-rename) when the atomic
+        // replace is refused (e.g. the destination is briefly open by another
+        // handle, or AV/indexer holds the temp source). `fs::copy` opens `to`
+        // with create+truncate and overwrites its bytes in place — the
+        // destination path never stops existing, so a concurrent heartbeat
+        // poll can never read NotFound -> LockGone (terminal). The earlier
+        // remove-then-rename fallback left a window where, if the second
+        // rename also failed, `to` was permanently deleted; copy-over closes
+        // that race class entirely. Worst case a reader observes a partially
+        // written file and gets Malformed, which is transient and retried —
+        // never fatal. Best-effort cleanup of the temp source afterward.
+        Err(original) => match fs::copy(from, to) {
+            Ok(_) => {
+                let _ = fs::remove_file(from);
+                Ok(())
+            }
+            // Both the atomic replace and the copy-over failed. Leave `to`
+            // untouched (copy create+truncate only proceeds once it can open
+            // the destination) and surface the original rename error.
+            Err(_) => Err(original),
+        },
+    }
 }
 
 #[cfg(not(windows))]
