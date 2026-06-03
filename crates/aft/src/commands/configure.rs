@@ -1616,19 +1616,43 @@ pub fn handle_configure(req: &RawRequest, ctx: &AppContext) -> Response {
         degraded_reasons.push("home_root".to_string());
     }
 
+    // `_bypass_size_limits` (set by `aft warmup --force`) lifts all three
+    // file-count caps so a very large repo is fully indexed for measurement:
+    // callgraph (`max_callgraph_files`), search index (`MAX_SEARCH_INDEX_FILES`),
+    // and semantic (`semantic.max_files`). Not a user-facing config knob — it is
+    // an internal benchmarking escape hatch. We raise to a large-but-safe value
+    // (not usize::MAX) so the `+ 1` below cannot overflow.
+    let bypass_size_limits = params
+        .get("_bypass_size_limits")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if bypass_size_limits {
+        const UNCAPPED: usize = 1_000_000_000;
+        next_config.max_callgraph_files = next_config.max_callgraph_files.max(UNCAPPED);
+        next_config.semantic.max_files = next_config.semantic.max_files.max(UNCAPPED);
+    }
+
     // The cap-bounded count below uses `take(max + 1)` so it costs O(cap),
     // not O(project), and feeds both call-graph viability and search-index
     // auto-disable decisions.
     let max_callgraph_files = next_config.max_callgraph_files;
+    // `--force`/bypass also lifts the hardcoded search-index file limit.
+    let search_index_limit = if bypass_size_limits {
+        usize::MAX - 1
+    } else {
+        MAX_SEARCH_INDEX_FILES
+    };
     let (source_file_count, exceeds, exceeds_search_threshold) = if home_match {
         (max_callgraph_files + 1, true, true)
     } else {
-        let walk_limit = max_callgraph_files.max(MAX_SEARCH_INDEX_FILES) + 1;
+        let walk_limit = max_callgraph_files
+            .max(search_index_limit)
+            .saturating_add(1);
         let count = crate::callgraph::walk_project_files(&root_path)
             .take(walk_limit)
             .count();
         let exceeds_cg = count > max_callgraph_files;
-        let exceeds_search = count > MAX_SEARCH_INDEX_FILES;
+        let exceeds_search = count > search_index_limit;
         (count, exceeds_cg, exceeds_search)
     };
     if exceeds {

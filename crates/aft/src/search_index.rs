@@ -296,6 +296,7 @@ impl SearchIndex {
     }
 
     pub fn build_with_limit(root: &Path, max_file_size: u64) -> Self {
+        let started = std::time::Instant::now();
         let project_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         let mut index = SearchIndex {
             project_root: project_root.clone(),
@@ -305,12 +306,20 @@ impl SearchIndex {
         };
 
         let filters = PathFilters::default();
+        let mut indexed = 0usize;
         for path in walk_project_files(&project_root, &filters) {
             index.update_file(&path);
+            indexed += 1;
         }
 
         index.git_head = current_git_head(&project_root);
         index.ready = true;
+        crate::slog_info!(
+            "search index cold build: {} files, {} trigrams, {} ms",
+            indexed,
+            index.postings.len(),
+            started.elapsed().as_millis()
+        );
         index
     }
 

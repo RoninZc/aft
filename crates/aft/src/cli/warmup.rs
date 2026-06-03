@@ -50,7 +50,7 @@ pub fn run(args: Vec<OsString>) -> Result<(), WarmupError> {
     }
 
     let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), Config::default());
-    configure(&ctx, &root, &storage_dir)?;
+    configure(&ctx, &root, &storage_dir, args.force)?;
     wait_until_ready(&ctx, args.timeout_ms, args.quiet)
 }
 
@@ -94,6 +94,10 @@ struct WarmupArgs {
     timeout_ms: u64,
     quiet: bool,
     help: bool,
+    /// Bypass the file-count caps (callgraph `max_callgraph_files`, semantic
+    /// `semantic.max_files`) so a very large repo is fully indexed. Intended
+    /// for benchmarking/measuring the worst case, not normal warmup.
+    force: bool,
 }
 
 impl WarmupArgs {
@@ -103,6 +107,7 @@ impl WarmupArgs {
             timeout_ms: DEFAULT_TIMEOUT_MS,
             quiet: false,
             help: false,
+            force: false,
         };
 
         let mut iter = args.into_iter();
@@ -125,6 +130,7 @@ impl WarmupArgs {
                     }
                 }
                 "--quiet" => parsed.quiet = true,
+                "--force" => parsed.force = true,
                 "--help" | "-h" => parsed.help = true,
                 other => {
                     return Err(WarmupError::usage(format!(
@@ -151,7 +157,10 @@ fn next_value(
 }
 
 fn print_usage() {
-    println!("aft warmup --root <absolute-path> [--timeout <ms>] [--quiet]");
+    println!("aft warmup --root <absolute-path> [--timeout <ms>] [--quiet] [--force]");
+    println!(
+        "  --force  bypass file-count caps (callgraph + semantic) to fully index a large repo"
+    );
 }
 
 fn warmup_storage_dir() -> PathBuf {
@@ -169,19 +178,29 @@ fn configure(
     ctx: &AppContext,
     root: &std::path::Path,
     storage_dir: &std::path::Path,
+    force: bool,
 ) -> Result<(), WarmupError> {
+    let mut params = json!({
+        "project_root": root.display().to_string(),
+        "harness": "opencode",
+        "search_index": true,
+        "semantic_search": true,
+        "storage_dir": storage_dir.display().to_string(),
+    });
+    if force {
+        // Lift the file-count caps (callgraph `max_callgraph_files`, semantic
+        // `semantic.max_files`, and the hardcoded search-index file limit) so a
+        // very large repo is fully indexed for measurement. configure honors
+        // this internal flag by raising the effective caps and skipping the
+        // size-based auto-disable.
+        params["_bypass_size_limits"] = json!(true);
+    }
     let req = RawRequest {
         id: "warmup-configure".to_string(),
         command: "configure".to_string(),
         lsp_hints: None,
         session_id: Some("warmup".to_string()),
-        params: json!({
-            "project_root": root.display().to_string(),
-            "harness": "opencode",
-            "search_index": true,
-            "semantic_search": true,
-            "storage_dir": storage_dir.display().to_string(),
-        }),
+        params,
     };
 
     let response = aft::commands::configure::handle_configure(&req, ctx);
