@@ -193,15 +193,10 @@ describe("Tool round-trips", () => {
       },
       sdkCtx,
     );
-    const result = JSON.parse(resultStr);
+    // Agent-facing output is the compact summary, not raw JSON.
+    expect(resultStr).toMatch(/^Edited \(\+\d+\/-\d+\)/);
 
-    expect(result.success).toBe(true);
-    expect(result.backup_id).toBeDefined();
-    expect(typeof result.backup_id).toBe("string");
-    expect(result.symbol).toBe("hello");
-    expect(result.operation).toBe("replace");
-
-    // Verify the file was actually changed
+    // Behavior is verified from disk: the symbol body was actually replaced.
     const fileContent = await readFile(filePath, "utf-8");
     expect(fileContent).toContain("world");
     expect(fileContent).not.toContain('"hi"');
@@ -224,19 +219,17 @@ describe("Tool round-trips", () => {
     // Edit the symbol
     const replacement =
       "export function greet(name: string): string {\n  return `Goodbye, ${name}!`;\n}\n";
-    const editResult = JSON.parse(
-      await editTools.aft_edit.execute(
-        {
-          mode: "symbol",
-          file: filePath,
-          symbol: "greet",
-          operation: "replace",
-          content: replacement,
-        },
-        sdkCtx,
-      ),
+    const editResult = await editTools.aft_edit.execute(
+      {
+        mode: "symbol",
+        file: filePath,
+        symbol: "greet",
+        operation: "replace",
+        content: replacement,
+      },
+      sdkCtx,
     );
-    expect(editResult.success).toBe(true);
+    expect(editResult).toMatch(/^Edited \(\+\d+\/-\d+\)/);
 
     // Verify file was changed
     let content = await readFile(filePath, "utf-8");
@@ -274,14 +267,10 @@ describe("Tool round-trips", () => {
       },
       sdkCtx,
     );
-    const result = JSON.parse(resultStr);
+    // Agent-facing output is the compact transaction summary, not raw JSON.
+    expect(resultStr).toContain("Applied edits to 2 files.");
 
-    expect(result.success).toBe(true);
-    expect(result.files_modified).toBe(2);
-    expect(Array.isArray(result.results)).toBe(true);
-    expect(result.results.length).toBe(2);
-
-    // Verify both files were created
+    // Verify both files were created (behavior from disk).
     const content1 = await readFile(file1, "utf-8");
     const content2 = await readFile(file2, "utf-8");
     expect(content1).toContain("a = 1");

@@ -199,9 +199,11 @@ describe("Hoisted tool execute handlers", () => {
       sdkCtx,
     );
 
-    expect(JSON.parse(result)).toEqual({ success: true, replacements: 1 });
+    // Agent-facing result is the compact summary sentence, not raw JSON.
+    expect(result).toBe("Edited (+0/-0).");
     expect(result).not.toContain("lsp_diagnostics");
     expect(result).not.toContain("LSP errors detected");
+    expect(result).not.toContain("backup_id");
     expect(calls[0].command).toBe("edit_match");
     expect(calls[0].params.diagnostics).toBe(false);
   });
@@ -227,8 +229,8 @@ describe("Hoisted tool execute handlers", () => {
       sdkCtx,
     );
 
-    const parsed = JSON.parse(result.split("\n\nLSP errors detected")[0]);
-    expect(parsed.lsp_diagnostics).toEqual(diagnostics);
+    // Headline is the compact summary; LSP errors are appended below it.
+    expect(result.split("\n\n")[0]).toBe("Edited (+0/-0).");
     expect(calls[0].params.diagnostics).toBe(true);
     expect(result).toContain("Line 3: Missing import");
   });
@@ -492,7 +494,8 @@ describe("Hoisted tool execute handlers", () => {
       sdkCtx,
     );
 
-    expect(JSON.parse(result)).toEqual({ success: true, edits_applied: 2 });
+    // 2 edits applied, no diff in the mock -> counts default to 0.
+    expect(result).toBe("Edited (+0/-0, 2 edits).");
     expect(calls).toHaveLength(1);
     expect(calls[0]).toEqual({
       command: "batch",
@@ -570,7 +573,8 @@ describe("Hoisted tool execute handlers", () => {
       sdkCtx,
     );
 
-    expect(JSON.parse(result)).toEqual({ success: true, replacements: 3 });
+    // replaceAll with 3 replacements -> count surfaced; no diff -> +0/-0.
+    expect(result).toBe("Edited (+0/-0, 3 replacements).");
     expect(calls).toHaveLength(1);
     expect(calls[0]).toEqual({
       command: "edit_match",
@@ -612,15 +616,9 @@ describe("Hoisted tool execute handlers", () => {
     expect(result).not.toContain(bigAfter);
     expect(result.length).toBeLessThan(2_000);
 
-    // Counts survive for the agent's verification signal.
-    const parsed = JSON.parse(result.split("\n\n")[0]) as {
-      success: boolean;
-      diff?: { additions?: number; deletions?: number; before?: string; after?: string };
-    };
-    expect(parsed.success).toBe(true);
-    expect(parsed.diff).toEqual({ additions: 1, deletions: 1 });
-    expect(parsed.diff?.before).toBeUndefined();
-    expect(parsed.diff?.after).toBeUndefined();
+    // Counts survive for the agent's verification signal, in the compact
+    // summary sentence (no raw JSON, no before/after content).
+    expect(result).toBe("Edited (+1/-1).");
   });
 
   /// BUG-6a (per-file commit): when a 2-hunk patch has 1 success and 1

@@ -20,6 +20,7 @@
 import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { formatEditSummary } from "@cortexkit/aft-bridge";
 import {
   type AgentToolResult,
   type ExtensionAPI,
@@ -342,7 +343,7 @@ export function registerHoistedTools(
           },
           extCtx,
         );
-        return buildMutationResult(params.filePath, response);
+        return buildMutationResult(response);
       },
       renderCall(args, theme, context) {
         return renderMutationCall("write", args?.filePath, theme, context);
@@ -392,7 +393,7 @@ export function registerHoistedTools(
             include_diff_content: true,
           };
           const response = await callBridge(bridge, "edit_match", req, extCtx);
-          return buildMutationResult(params.filePath, response);
+          return buildMutationResult(response);
         }
 
         const req: Record<string, unknown> = {
@@ -412,7 +413,7 @@ export function registerHoistedTools(
         if (occurrence !== undefined) req.occurrence = occurrence;
 
         const response = await callBridge(bridge, "edit_match", req, extCtx);
-        return buildMutationResult(params.filePath, response);
+        return buildMutationResult(response);
       },
       renderCall(args, theme, context) {
         return renderMutationCall("edit", args?.filePath, theme, context);
@@ -475,7 +476,6 @@ export function registerHoistedTools(
  * behavior without spinning up a real bridge.
  */
 export function buildMutationResult(
-  filePath: string,
   response: Record<string, unknown>,
 ): AgentToolResult<FileMutationDetails> {
   const diffObj = response.diff as
@@ -525,19 +525,14 @@ export function buildMutationResult(
     firstChangedLine = piDiff.firstChangedLine;
   }
 
-  // Agent-facing text: summary header + diff (if present) + truncation
-  // notice + no-op notice + format-skip notice (non-benign reasons only)
-  // + diagnostics.
-  const summaryHeader =
-    replacements !== undefined
-      ? `Edited ${filePath} (+${additions}/-${deletions}, ${replacements} replacement${replacements === 1 ? "" : "s"})`
-      : `Wrote ${filePath} (+${additions}/-${deletions})`;
-  // Agent-facing text deliberately omits the diff body: the agent already
-  // knows what it changed (it supplied the edit), so echoing before/after into
-  // context wastes tokens proportional to file size. The line-numbered diff
-  // stays in `details.diff` for the TUI renderer only. Matches OpenCode native
-  // edit, which returns just "Edit applied successfully." to the model.
-  let text = summaryHeader;
+  // Agent-facing text: compact summary header (shared with OpenCode via
+  // formatEditSummary) + conditional notices below. The header deliberately
+  // omits the file path and the diff body: the agent supplied both the path
+  // and the content, so echoing them back wastes tokens proportional to file
+  // size. The line-numbered diff stays in `details.diff` for the TUI renderer
+  // (which sources the path from the call args, not this text). This keeps the
+  // OpenCode and Pi agent-facing edit output byte-identical in shape.
+  let text = formatEditSummary(response as Record<string, unknown>);
   if (noOp) {
     // Surface the no-op signal explicitly so the agent can distinguish "the
     // tool failed silently" from "the edit matched but produced no net change".

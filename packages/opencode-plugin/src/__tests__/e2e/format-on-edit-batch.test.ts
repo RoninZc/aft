@@ -94,10 +94,6 @@ async function createToolHarness(
   };
 }
 
-function parseToolJson(output: string): Record<string, unknown> {
-  return JSON.parse(output.split("\n\nLSP errors detected")[0]) as Record<string, unknown>;
-}
-
 maybeDescribe("e2e format_on_edit batch operations", () => {
   let preparedBinary: PreparedBinary = initialBinary;
   const harnesses: E2EHarness[] = [];
@@ -165,33 +161,32 @@ sed -E 's/  +/ /g; s/{/{\n    /; s/;}/;\n}/' "$file" > "$file.tmp" && mv "$file.
     await writeFile(h.path("one.ts"), "export const tsValue = 1;\n", "utf8");
     await writeFile(h.path("main.rs"), "fn main(){let x=1;}\n", "utf8");
 
-    const response = parseToolJson(
-      await tools.edit.execute(
-        {
-          operations: [
-            {
-              file: h.path("one.ts"),
-              command: "edit_match",
-              match: "export const tsValue = 1;",
-              replacement: "export    const   tsValue   = 2;",
-            },
-            {
-              file: h.path("main.rs"),
-              command: "edit_match",
-              match: "fn main(){let x=1;}",
-              replacement: "fn   main(){let   x=2;}",
-            },
-          ],
-        },
-        sdkCtx,
-      ),
+    const output = await tools.edit.execute(
+      {
+        operations: [
+          {
+            file: h.path("one.ts"),
+            command: "edit_match",
+            match: "export const tsValue = 1;",
+            replacement: "export    const   tsValue   = 2;",
+          },
+          {
+            file: h.path("main.rs"),
+            command: "edit_match",
+            match: "fn main(){let x=1;}",
+            replacement: "fn   main(){let   x=2;}",
+          },
+        ],
+      },
+      sdkCtx,
     );
 
-    expect(response.success).toBe(true);
-    expect(response.files_modified).toBe(2);
-    const results = response.results as Array<Record<string, unknown>>;
-    expect(results.find((r) => String(r.file).endsWith("one.ts"))?.formatted).toBe(true);
-    expect(results.find((r) => String(r.file).endsWith("main.rs"))?.formatted).toBe(false);
+    // Agent-facing output is the compact transaction summary, not raw JSON.
+    expect(output).toContain("Applied edits to 2 files.");
+    // Per-file formatting is verified from DISK (stronger than trusting the
+    // response shape): the TS shim collapses runs of spaces, so a formatted
+    // file has single spaces; the .rs file has no formatter configured here,
+    // so it keeps the unformatted spacing.
     expect(await readTextFile(h.path("one.ts"))).toBe("export const tsValue = 2;\n");
     expect(await readTextFile(h.path("main.rs"))).toBe("fn   main(){let   x=2;}\n");
   });
@@ -201,32 +196,28 @@ sed -E 's/  +/ /g; s/{/{\n    /; s/;}/;\n}/' "$file" > "$file.tmp" && mv "$file.
     await mkdir(h.path("src"), { recursive: true });
     await mkdir(h.path("scratch"), { recursive: true });
 
-    const response = parseToolJson(
-      await tools.edit.execute(
-        {
-          operations: [
-            {
-              file: h.path("src", "in.ts"),
-              command: "write",
-              content: "export    const   inScope   = 1;\n",
-            },
-            {
-              file: h.path("scratch", "out.ts"),
-              command: "write",
-              content: "export    const   outScope   = 1;\n",
-            },
-          ],
-        },
-        sdkCtx,
-      ),
+    const output = await tools.edit.execute(
+      {
+        operations: [
+          {
+            file: h.path("src", "in.ts"),
+            command: "write",
+            content: "export    const   inScope   = 1;\n",
+          },
+          {
+            file: h.path("scratch", "out.ts"),
+            command: "write",
+            content: "export    const   outScope   = 1;\n",
+          },
+        ],
+      },
+      sdkCtx,
     );
 
-    const results = response.results as Array<Record<string, unknown>>;
-    expect(response.success).toBe(true);
-    expect(results.find((r) => String(r.file).endsWith("src/in.ts"))?.formatted).toBe(false);
-    expect(
-      results.find((r) => String(r.file).endsWith("scratch/out.ts"))?.format_skipped_reason,
-    ).toBe("formatter_excluded_path");
+    expect(output).toContain("Applied edits to 2 files.");
+    // Both files stay unformatted on disk: src/in.ts is matched by the shim's
+    // exclude rule and scratch/out.ts is outside the formatter's scope. The
+    // excluded-path skip reason is a UI-metadata concern, not agent-facing.
     expect(await readTextFile(h.path("src", "in.ts"))).toBe("export    const   inScope   = 1;\n");
     expect(await readTextFile(h.path("scratch", "out.ts"))).toBe(
       "export    const   outScope   = 1;\n",
@@ -267,23 +258,21 @@ sed -E 's/  +/ /g; s/{/{\n    /; s/;}/;\n}/' "$file" > "$file.tmp" && mv "$file.
   test("multi-file batch — write-mode operation triggers formatter", async () => {
     const { h, tools, sdkCtx } = await harness(BIOME_TS_PRESET);
 
-    const response = parseToolJson(
-      await tools.edit.execute(
-        {
-          operations: [
-            {
-              file: h.path("written.ts"),
-              command: "write",
-              content: "export    const   written   = 1;\n",
-            },
-          ],
-        },
-        sdkCtx,
-      ),
+    const output = await tools.edit.execute(
+      {
+        operations: [
+          {
+            file: h.path("written.ts"),
+            command: "write",
+            content: "export    const   written   = 1;\n",
+          },
+        ],
+      },
+      sdkCtx,
     );
 
-    expect(response.success).toBe(true);
-    expect((response.results as Array<Record<string, unknown>>)[0].formatted).toBe(true);
+    expect(output).toContain("Applied edits to 1 file.");
+    // Formatting verified from disk: the shim collapsed the spaces.
     expect(await readTextFile(h.path("written.ts"))).toBe("export const written = 1;\n");
   });
 

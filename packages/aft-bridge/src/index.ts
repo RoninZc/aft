@@ -30,6 +30,8 @@ export {
   getCacheDir,
   getCachedBinaryPath,
 } from "./downloader.js";
+export type { EditSummaryInput } from "./edit-summary.js";
+export { formatEditSummary } from "./edit-summary.js";
 // --- compact UI formatting ---
 export { compressionSavingsPercent, formatTokenCount } from "./format.js";
 // --- jsonc helpers ---

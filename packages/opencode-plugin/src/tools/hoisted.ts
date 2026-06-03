@@ -11,6 +11,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { formatEditSummary } from "@cortexkit/aft-bridge";
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { resolveBashConfig } from "../config.js";
@@ -840,7 +841,10 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
         if (response.success === false) {
           throw new Error((response.message as string | undefined) ?? "transaction failed");
         }
-        return JSON.stringify(response);
+        // Compact summary instead of the raw JSON envelope. Multi-file
+        // transactions report `files_modified`; formatEditSummary turns that
+        // into "Applied edits to N files." Per-file diffs live in UI metadata.
+        return formatEditSummary(response as Record<string, unknown>);
       }
 
       const file = args.filePath as string;
@@ -958,18 +962,14 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
         }
       }
 
-      // Agent-facing result must NOT carry full before/after file contents.
-      // We requested `include_diff_content` purely for the UI metadata above;
-      // echoing it back to the model makes the payload scale with file size,
-      // not edit size (a 1-line change in a 600-line file = the whole file
-      // twice). Replace diff with counts-only for the agent — the model
-      // already knows what it changed.
-      const agentData = { ...data } as Record<string, unknown>;
-      if (agentData.diff && typeof agentData.diff === "object") {
-        const d = agentData.diff as { additions?: number; deletions?: number };
-        agentData.diff = { additions: d.additions ?? 0, deletions: d.deletions ?? 0 };
-      }
-      let result = JSON.stringify(agentData);
+      // Agent-facing result is a compact summary sentence, NOT the raw Rust
+      // JSON envelope. The model supplied the path and the content, so echoing
+      // back the path, before/after, backup id, status-bar counts, etc. is
+      // pure token waste that scales with file size. The rich data stays in
+      // the UI `metadata` (stored above); the status-bar line is injected
+      // separately by the bridge. Matches the `write`/`apply_patch` contract
+      // and keeps OpenCode/Pi agent-facing output in parity.
+      let result = formatEditSummary(data as Record<string, unknown>);
 
       const globSkipNote = formatGlobSkipReasonsNote(data.format_skip_reasons as unknown);
       if (globSkipNote) result += `\n\n${globSkipNote}`;

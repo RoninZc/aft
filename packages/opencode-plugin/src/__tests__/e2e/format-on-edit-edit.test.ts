@@ -145,7 +145,7 @@ maybeDescribe("e2e format_on_edit edit tool", () => {
     expect(data.formatted).toBe(formatted);
     if (reason) expect(data.format_skipped_reason).toBe(reason);
     else expect(data.format_skipped_reason).toBeUndefined();
-    if (formatted) expect(output).toContain('"formatted":true');
+    if (formatted) expect(output).toContain("Auto-formatted.");
     else expect(output).not.toContain("Auto-formatted.");
   }
 
@@ -221,7 +221,7 @@ maybeDescribe("e2e format_on_edit edit tool", () => {
     // Hoisted `edit` tool returns JSON-stringified Rust response, so the
     // `formatted: true` signal is in the JSON output (the human-readable
     // "Auto-formatted." string is only used by hoisted `write`).
-    expect(output).toContain('"formatted":true');
+    expect(output).toContain("Auto-formatted.");
   });
 
   test("edit symbol replace triggers formatter", async () => {
@@ -281,7 +281,7 @@ maybeDescribe("e2e format_on_edit edit tool", () => {
 
     expect(await readFile(tsFile, "utf8")).toContain("export const alpha = 2;");
     expect(await readFile(rsFile, "utf8")).toBe("fn main() {\n    let x = 42;\n}\n");
-    expect(output).toContain('"files_modified":2');
+    expect(output).toContain("Applied edits to 2 files.");
     expect(data.results).toBeArray();
   });
 
