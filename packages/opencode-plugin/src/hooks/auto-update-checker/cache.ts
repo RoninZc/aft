@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { npmSpawnEnv, resolveNpm } from "@cortexkit/aft-bridge";
 import { parse as parseJsonc } from "comment-json";
 
 import { log, warn } from "../../logger.js";
@@ -253,13 +254,23 @@ export async function runNpmInstallSafe(
 
   try {
     if (options.signal?.aborted) return { ok: false, reason: "aborted" };
-    const npmBin = process.platform === "win32" ? "npm.cmd" : "npm";
+    // Resolve npm beyond PATH: GUI/Desktop launches often have a stripped PATH
+    // with no version-manager bin dir, so a bare `npm` spawn fails with ENOENT
+    // and the update silently never installs. resolveNpm() also yields the bin
+    // dir so npm's `#!/usr/bin/env node` shebang can find its sibling node.
+    const npm = resolveNpm();
+    if (!npm) {
+      const reason = "npm not found on PATH or in known version-manager locations";
+      warnNpmInstallFailure(reason, stderrTail);
+      return { ok: false, reason };
+    }
     const proc = spawn(
-      npmBin,
+      npm.command,
       ["install", "--no-audit", "--no-fund", "--no-progress", "--ignore-scripts"],
       {
         cwd: installDir,
         stdio: ["ignore", "pipe", "pipe"],
+        env: npmSpawnEnv(npm),
       },
     );
     proc.stderr?.on("data", (chunk: Buffer) => {

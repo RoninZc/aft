@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -11,6 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { npmSpawnEnv, resolveNpm } from "@cortexkit/aft-bridge";
 
 import type { HarnessAdapter } from "../adapters/types.js";
 import { getBinaryCacheInfo } from "../lib/binary-cache.js";
@@ -375,8 +377,48 @@ export function clearOldBinaries(): BinaryCacheClearResult {
 }
 
 export interface DoctorFixPlanItem {
-  kind: "plugin" | "binary" | "onnx" | "storage" | "schema";
+  kind: "plugin" | "plugin-update" | "binary" | "onnx" | "storage" | "schema";
   message: string;
+}
+
+/**
+ * Harnesses whose installed plugin is OLDER than this CLI (the
+ * `plugin_cli_version_skew` diagnostic). This is the case where the plugin's own
+ * auto-updater couldn't run `npm install` (commonly because a GUI/Desktop launch
+ * had no npm on PATH), so the user is stuck on the old plugin. `doctor --fix`
+ * can reinstall the latest plugin via the npm we resolve beyond PATH.
+ */
+interface PluginUpdateTarget {
+  adapter: HarnessAdapter;
+  installDir: string;
+  cached: string;
+  latest: string;
+}
+
+function findPluginUpdateTargets(
+  adapters: HarnessAdapter[],
+  report: DiagnosticReport,
+): PluginUpdateTarget[] {
+  const adaptersByKind = new Map(adapters.map((a) => [a.kind, a]));
+  const targets: PluginUpdateTarget[] = [];
+  for (const harness of report.harnesses) {
+    // Only OpenCode reinstalls a plugin npm package this way; Pi manages its own
+    // packages via `pi install`, handled by the plugin-registration fix.
+    if (harness.kind !== "opencode") continue;
+    if (!harness.hostInstalled || !harness.pluginRegistered) continue;
+    const cache = harness.pluginCache;
+    if (!cache?.exists || !cache.cached || !cache.latest) continue;
+    if (cache.cached === cache.latest) continue;
+    const adapter = adaptersByKind.get(harness.kind);
+    if (!adapter) continue;
+    targets.push({
+      adapter,
+      installDir: cache.path,
+      cached: cache.cached,
+      latest: cache.latest,
+    });
+  }
+  return targets;
 }
 
 interface SchemaFixTarget {
@@ -407,6 +449,50 @@ function findSchemaFixTargets(adapters: HarnessAdapter[]): SchemaFixTarget[] {
     targets.push({ adapter, aftConfig, aftConfigFormat });
   }
   return targets;
+}
+
+async function applyPluginUpdates(
+  targets: PluginUpdateTarget[],
+): Promise<{ updated: number; errors: number }> {
+  let updated = 0;
+  let errors = 0;
+  if (targets.length === 0) return { updated, errors };
+
+  const npm = resolveNpm();
+  if (!npm) {
+    errors += targets.length;
+    log.error(
+      "Could not find npm on PATH or in known version-manager locations, so the plugin cannot be updated automatically. Install Node/npm, or launch your editor from a shell where npm is available.",
+    );
+    return { updated, errors };
+  }
+
+  for (const target of targets) {
+    try {
+      // `npm install` in the plugin's cache dir reinstalls against the
+      // package.json dependency spec OpenCode wrote (pinned to @latest), pulling
+      // the newest plugin. Mirrors the plugin auto-updater's install flags.
+      execFileSync(
+        npm.command,
+        ["install", "--no-audit", "--no-fund", "--no-progress", "--ignore-scripts"],
+        {
+          cwd: target.installDir,
+          env: npmSpawnEnv(npm),
+          stdio: ["ignore", "pipe", "pipe"],
+          timeout: 120_000,
+        },
+      );
+      updated += 1;
+      log.success(
+        `${target.adapter.displayName}: plugin updated ${target.cached} → ${target.latest} (restart ${target.adapter.displayName} to apply)`,
+      );
+    } catch (err) {
+      errors += 1;
+      const message = err instanceof Error ? err.message : String(err);
+      log.error(`${target.adapter.displayName}: plugin update failed: ${message}`);
+    }
+  }
+  return { updated, errors };
 }
 
 function applySchemaFixes(targets: SchemaFixTarget[]): { changed: number; errors: number } {
@@ -454,6 +540,13 @@ export function buildDoctorFixPlan(
         message: `Will add ${adapter.pluginEntryWithVersion} to ${harness.configPaths.harnessConfig}`,
       });
     }
+  }
+
+  for (const target of findPluginUpdateTargets(adapters, report)) {
+    items.push({
+      kind: "plugin-update",
+      message: `Will update ${target.adapter.displayName} plugin ${target.cached} → ${target.latest} via npm (the plugin's own auto-update could not run, often no npm on PATH)`,
+    });
   }
 
   if (!report.binaryVersion) {
@@ -566,6 +659,7 @@ async function runFixFlow(argv: string[]): Promise<number> {
   }
 
   await fixPluginEntries(adapters);
+  const pluginUpdateSummary = await applyPluginUpdates(findPluginUpdateTargets(adapters, report));
   const storageSummary = ensureStorageDirsForRegisteredPlugins(adapters);
 
   // Ensure aft.jsonc carries the $schema URL (editor autocomplete + validation).
@@ -626,7 +720,9 @@ async function runFixFlow(argv: string[]): Promise<number> {
     storageSummary.created === 0 &&
     storageSummary.errors === 0 &&
     schemaSummary.changed === 0 &&
-    schemaSummary.errors === 0
+    schemaSummary.errors === 0 &&
+    pluginUpdateSummary.updated === 0 &&
+    pluginUpdateSummary.errors === 0
   ) {
     log.info("No auto-fixable issues detected.");
     note(
@@ -644,7 +740,8 @@ async function runFixFlow(argv: string[]): Promise<number> {
     (onnxResult?.errors.length ?? 0) > 0 ||
     binaryDownloadError !== null ||
     storageSummary.errors > 0 ||
-    schemaSummary.errors > 0;
+    schemaSummary.errors > 0 ||
+    pluginUpdateSummary.errors > 0;
   const afterReport = await collectDiagnostics(adapters);
   const stillHasProblems = hasDoctorProblems(afterReport);
   outro(

@@ -3,6 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import type { HarnessAdapter, HarnessConfigPaths } from "../adapters/types.js";
 import {
+  buildDoctorFixPlan,
   clearDoctorCaches,
   DOCTOR_CLEAR_TARGET_OPTIONS,
   DOCTOR_FORCE_CLEAR_TARGETS,
@@ -106,6 +107,54 @@ function makeReport(harness: HarnessDiagnostic): DiagnosticReport {
     },
   };
 }
+
+describe("buildDoctorFixPlan plugin-update", () => {
+  test("plans a plugin update when cached plugin is older than latest", () => {
+    const adapter = makeAdapter();
+    const report = makeReport(
+      makeHarness({
+        pluginCache: {
+          path: "/tmp/aft-test/plugin-cache",
+          exists: true,
+          cached: "0.34.0",
+          latest: "0.35.0",
+        },
+      }),
+    );
+    const plan = buildDoctorFixPlan([adapter], report);
+    const updateItem = plan.find((p) => p.kind === "plugin-update");
+    expect(updateItem).toBeDefined();
+    expect(updateItem?.message).toContain("0.34.0");
+    expect(updateItem?.message).toContain("0.35.0");
+  });
+
+  test("does NOT plan a plugin update when cached === latest", () => {
+    const adapter = makeAdapter();
+    const report = makeReport(
+      makeHarness({
+        pluginCache: {
+          path: "/tmp/aft-test/plugin-cache",
+          exists: true,
+          cached: "0.35.0",
+          latest: "0.35.0",
+        },
+      }),
+    );
+    const plan = buildDoctorFixPlan([adapter], report);
+    expect(plan.some((p) => p.kind === "plugin-update")).toBe(false);
+  });
+
+  test("does NOT plan a plugin update when cache does not exist", () => {
+    const adapter = makeAdapter();
+    const report = makeReport(
+      makeHarness({
+        pluginCache: { path: "/tmp/aft-test/plugin-cache", exists: false },
+      }),
+    );
+    const plan = buildDoctorFixPlan([adapter], report);
+    expect(plan.some((p) => p.kind === "plugin-update")).toBe(false);
+  });
+});
 
 describe("doctor cache clear targets", () => {
   test("lists the interactive clear categories in prompt order", () => {

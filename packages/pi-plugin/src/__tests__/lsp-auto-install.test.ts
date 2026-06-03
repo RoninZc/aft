@@ -251,17 +251,16 @@ describe("runAutoInstall", () => {
     expect(result.installingBinaries).not.toContain("yaml-language-server");
   });
 
-  test("runInstall uses npm for Pi and unreferences spawned children", () => {
+  test("runInstall uses resolved npm for Pi and unreferences spawned children", () => {
     const source = readFileSync(new URL("../lsp-auto-install.ts", import.meta.url), "utf8");
-    // Node's child_process.spawn on Windows does not auto-resolve `.cmd`
-    // shims, and npm ships as `npm.cmd` there. Assert the platform branch
-    // + the spawn invocation separately so the test survives formatter
-    // reflows of the source.
+    // npm must be resolved via the shared resolver (handles npm.cmd on win32
+    // AND finds npm beyond a GUI-stripped PATH), then spawned by its resolved
+    // command with the spawn-env that makes its node sibling reachable.
+    expect(source).toMatch(/resolveNpm\(\)/);
+    expect(source).toMatch(/spawn\(\s*npm\.command\s*,/);
+    expect(source).toMatch(/env:\s*npmSpawnEnv\(npm\)/);
     expect(source).toMatch(
-      /process\.platform\s*===\s*["']win32["']\s*\?\s*["']npm\.cmd["']\s*:\s*["']npm["']/,
-    );
-    expect(source).toMatch(
-      /spawn\(\s*\w+\s*,\s*\[\s*["']install["']\s*,\s*["']--no-save["']\s*,\s*["']--ignore-scripts["']\s*,\s*["']--silent["']\s*,\s*target\s*\]/,
+      /\[\s*["']install["']\s*,\s*["']--no-save["']\s*,\s*["']--ignore-scripts["']\s*,\s*["']--silent["']\s*,\s*target\s*\]/,
     );
     expect(source).not.toContain('spawn("bun"');
     expect(source).toContain("child.unref()");

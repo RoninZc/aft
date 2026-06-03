@@ -43,6 +43,14 @@ export {
   resolveCortexKitStorageRoot,
   resolveLegacyStorageRoot,
 } from "./migration.js";
+// --- npm resolution (PATH-stripped GUI launch fallback) ---
+export type { ResolvedNpm } from "./npm-resolver.js";
+export {
+  isNpmAvailable,
+  npmSpawnEnv,
+  probeNpmVersion,
+  resolveNpm,
+} from "./npm-resolver.js";
 // --- ONNX runtime ---
 export {
   __test__ as __onnxTest__,

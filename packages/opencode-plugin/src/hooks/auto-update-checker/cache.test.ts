@@ -10,6 +10,13 @@ mock.module("../../logger.js", () => ({
   error: mock(() => {}),
 }));
 
+// Make npm resolution deterministic so the test does not depend on the host
+// environment having npm on PATH (the resolver now searches beyond PATH).
+mock.module("@cortexkit/aft-bridge", () => ({
+  resolveNpm: () => ({ command: "/usr/bin/npm", binDir: "/usr/bin" }),
+  npmSpawnEnv: (_npm: unknown, base: NodeJS.ProcessEnv = process.env) => ({ ...base }),
+}));
+
 /**
  * Lane G's auto-update-snapshot path (createAutoUpdateSnapshot in
  * cache.ts) calls `mkdtempSync` + `cpSync` to stage the installed
@@ -185,14 +192,26 @@ describe("auto-update-checker/cache", () => {
       // background auto-updates don't dump audit/funding output into the
       // plugin log. Earlier versions called `bun install`, which generated
       // a parallel bun.lock that drifted from OpenCode's package-lock.json.
-      expect(spawnMock).toHaveBeenCalledWith(
-        process.platform === "win32" ? "npm.cmd" : "npm",
-        ["install", "--no-audit", "--no-fund", "--no-progress", "--ignore-scripts"],
-        {
-          cwd: "/tmp/opencode",
-          stdio: ["ignore", "pipe", "pipe"],
-        },
-      );
+      // npm is now resolved beyond PATH (GUI-launch fix), so the command is the
+      // resolved npm path (ending in npm / npm.cmd) and the spawn carries a
+      // PATH-augmented env so npm's node sibling is reachable.
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+      const [cmd, args, opts] = spawnMock.mock.calls[0] as [
+        string,
+        string[],
+        { cwd: string; stdio: unknown; env?: NodeJS.ProcessEnv },
+      ];
+      expect(cmd).toMatch(process.platform === "win32" ? /npm\.cmd$|npm$/ : /\/npm$|^npm$/);
+      expect(args).toEqual([
+        "install",
+        "--no-audit",
+        "--no-fund",
+        "--no-progress",
+        "--ignore-scripts",
+      ]);
+      expect(opts.cwd).toBe("/tmp/opencode");
+      expect(opts.stdio).toEqual(["ignore", "pipe", "pipe"]);
+      expect(opts.env).toBeDefined();
 
       spawnMock.mockRestore();
     });

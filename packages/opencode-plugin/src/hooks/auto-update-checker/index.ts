@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
-import { repairRootScopedStorageFile } from "@cortexkit/aft-bridge";
+import { isNpmAvailable, repairRootScopedStorageFile } from "@cortexkit/aft-bridge";
 import type { PluginInput } from "@opencode-ai/plugin";
 
 import { log, warn } from "../../logger.js";
@@ -333,6 +333,26 @@ async function runBackgroundUpdateCheck(
       8000,
     );
     log("[auto-update-checker] Auto-update disabled, notification only");
+    return;
+  }
+
+  // Pre-flight: confirm npm is runnable BEFORE preparePackageUpdate() deletes
+  // the installed package and lock entry. Without this, a GUI launch with no
+  // npm on PATH would delete the working package, fail to reinstall, and depend
+  // on the restore-on-failure snapshot to recover — a crash/quit in that window
+  // would brick the plugin. If npm is unreachable, skip the destructive steps
+  // entirely and tell the user how to fix it.
+  if (!isNpmAvailable()) {
+    showToast(
+      ctx,
+      `AFT ${latestVersion} available`,
+      `v${latestVersion} is ready, but npm was not found so it can't auto-install. Run \`npx @cortexkit/aft doctor --fix\` from a terminal, or launch OpenCode from a shell where npm is on PATH.`,
+      "warning",
+      10000,
+    );
+    warn(
+      "[auto-update-checker] npm not found on PATH or known version-manager locations; skipping destructive auto-update steps",
+    );
     return;
   }
 

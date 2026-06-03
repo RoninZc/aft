@@ -32,6 +32,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, mkdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { npmSpawnEnv, resolveNpm } from "@cortexkit/aft-bridge";
 import { error, log, warn } from "./logger.js";
 import {
   isInstalled,
@@ -255,17 +256,27 @@ function runInstall(
       return;
     }
 
-    // Windows: Node's child_process.spawn does NOT auto-resolve `.cmd` for
-    // `npm`. The installed npm shim on Windows GitHub runners (and most user
-    // machines) is `npm.cmd`, so spawning `"npm"` directly fails with
-    // ENOENT: no such file or directory, uv_spawn 'npm'. Use `npm.cmd` on
-    // win32. shell: true would also work but enables shell parsing on a
-    // user-supplied `target` semver string — avoid that surface.
-    const npmBin = process.platform === "win32" ? "npm.cmd" : "npm";
-    const child = spawn(npmBin, ["install", "--no-save", "--ignore-scripts", "--silent", target], {
-      stdio: ["ignore", "pipe", "pipe"],
-      cwd,
-    });
+    // Resolve npm beyond PATH. Windows npm is `npm.cmd` (Node's spawn does not
+    // auto-resolve `.cmd`), and GUI/Desktop launches often have a stripped PATH
+    // with no version-manager bin dir, so a bare `npm` spawn fails with ENOENT.
+    // resolveNpm() handles both, and npmSpawnEnv() makes npm's node sibling
+    // reachable. shell:true is avoided so a user-supplied `target` semver is
+    // never shell-parsed.
+    const npm = resolveNpm();
+    if (!npm) {
+      warn(`[lsp] npm not found on PATH or known locations; cannot install ${target}`);
+      resolve(false);
+      return;
+    }
+    const child = spawn(
+      npm.command,
+      ["install", "--no-save", "--ignore-scripts", "--silent", target],
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+        cwd,
+        env: npmSpawnEnv(npm),
+      },
+    );
     child.unref();
 
     let stderrBuf = "";
