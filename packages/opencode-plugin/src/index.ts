@@ -200,6 +200,7 @@ const PLUGIN_VERSION: string = (() => {
  */
 const ANNOUNCEMENT_VERSION = "0.35.0";
 const ANNOUNCEMENT_FEATURES: string[] = [
+  "Leaner semantic indexing — local embedding now uses about half the CPU and a fraction of the peak memory, with no change to results and no re-index needed.",
   "New IDE-style status bar on tool results — live LSP errors/warnings plus dead-code, unused-export, duplicate, and TODO counts at a glance.",
   "`aft_inspect` is more accurate (dead-code reachability, duplicate collapse, ranked findings) and a background scheduler keeps its counts fresh during long sessions.",
   "The TUI sidebar is now collapsible — click the `AFT` header to toggle a condensed view.",
