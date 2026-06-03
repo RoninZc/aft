@@ -80,6 +80,19 @@ describe("resolveNpm", () => {
     expect(result?.binDir).toBe(nvmBin);
   });
 
+  it("falls back to an injected system dir when all else misses", () => {
+    const sysDir = join(root, "sys-bin");
+    makeNpm(sysDir);
+    const result = resolveNpm({
+      platform: "linux",
+      env: { PATH: "/nonexistent" },
+      home: root,
+      execPath: "/standalone/bun",
+      systemNpmDirs: ["/nonexistent/system", sysDir],
+    });
+    expect(result?.binDir).toBe(sysDir);
+  });
+
   it("resolves npm.cmd on win32", () => {
     const pathDir = join(root, "win-bin");
     makeNpm(pathDir, "npm.cmd");
@@ -98,6 +111,7 @@ describe("resolveNpm", () => {
       env: { PATH: "/nonexistent" },
       home: root, // empty tmp dir, no .nvm/.volta/etc
       execPath: "/standalone/bun",
+      systemNpmDirs: [], // hermetic: don't pick up a real /usr/local/bin/npm on CI
     });
     expect(result).toBeNull();
   });
@@ -109,6 +123,7 @@ describe("resolveNpm", () => {
       env: { PATH: `.${delimiter}relative/bin` },
       home: root,
       execPath: "/standalone/bun",
+      systemNpmDirs: [], // hermetic: ignore real system npm on CI
     });
     expect(result).toBeNull();
   });

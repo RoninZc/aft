@@ -34,6 +34,13 @@ interface ResolveNpmDeps {
   env: NodeJS.ProcessEnv;
   home: string;
   execPath: string;
+  /**
+   * Absolute system bin directories scanned last (e.g. /usr/local/bin). Defaults
+   * to the platform's well-known list. Injectable so tests can pass `[]` to stay
+   * hermetic — otherwise a real system npm (present on CI runners) leaks in and
+   * breaks the "returns null" cases.
+   */
+  systemNpmDirs?: string[];
 }
 
 function defaultDeps(): ResolveNpmDeps {
@@ -142,15 +149,13 @@ function wellKnownNpmDirs(deps: ResolveNpmDeps): string[] {
     // Fixed-location managers.
     push(join(home, ".volta", "bin"));
     push(join(home, ".asdf", "shims"));
-    // Homebrew + system.
-    if (platform === "darwin") {
-      push("/opt/homebrew/bin");
-      push("/usr/local/bin");
-    } else {
-      push("/usr/local/bin");
-      push("/usr/bin");
-      push(join(home, ".local", "bin"));
-    }
+    // Homebrew + system (injectable so tests stay hermetic; see ResolveNpmDeps).
+    const systemDirs =
+      deps.systemNpmDirs ??
+      (platform === "darwin"
+        ? ["/opt/homebrew/bin", "/usr/local/bin"]
+        : ["/usr/local/bin", "/usr/bin", join(home, ".local", "bin")]);
+    for (const dir of systemDirs) push(dir);
   }
   return dirs;
 }
