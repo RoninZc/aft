@@ -30,7 +30,16 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, mkdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
+import {
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { npmSpawnEnv, resolveNpm } from "@cortexkit/aft-bridge";
 import { error, log, warn } from "./logger.js";
@@ -226,6 +235,32 @@ async function resolveTargetVersion(
  * Uses `--ignore-scripts` to neutralize lifecycle hooks (the v0.16 audit
  * hardening). Output goes to plugin log.
  */
+/**
+ * Anchor an `npm install --no-save` to `cwd` by writing a minimal package.json.
+ *
+ * Without a package.json in `cwd`, npm walks UP the directory tree; if any
+ * ancestor (e.g. ~/package.json) has one, npm installs into THAT package's
+ * node_modules instead, leaving our cache dir's node_modules/<server> missing
+ * while still exiting 0. The result is a silent install failure and a recurring
+ * lsp_binary_missing warning. The old `bun add` flow created this package.json
+ * implicitly; npm needs it written explicitly. GitHub #92.
+ *
+ * Idempotent: only writes when absent. Failures are non-fatal (logged).
+ */
+export function ensureInstallAnchor(cwd: string): void {
+  try {
+    const stub = join(cwd, "package.json");
+    if (!existsSync(stub)) {
+      writeFileSync(
+        stub,
+        `${JSON.stringify({ name: "aft-lsp-cache", version: "0.0.0", private: true })}\n`,
+      );
+    }
+  } catch (err) {
+    warn(`[lsp] could not write package.json stub in ${cwd}: ${err}`);
+  }
+}
+
 function runInstall(
   spec: NpmServerSpec,
   version: string,
@@ -254,6 +289,9 @@ function runInstall(
       resolve(false);
       return;
     }
+
+    ensureInstallAnchor(cwd);
+
     const child = spawn(
       npm.command,
       ["install", "--no-save", "--ignore-scripts", "--silent", target],
