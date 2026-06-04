@@ -654,14 +654,18 @@ impl AppContext {
     /// Mark the status-bar Tier-2 counts stale (rendered with `~`) without
     /// changing the numbers — called when the watcher sees a source-file change,
     /// so the bar honestly signals the counts predate the latest edit until the
-    /// next background scan completes. No-op before the first populate.
-    pub fn mark_status_bar_tier2_stale(&self) {
+    /// next background scan completes. Returns true only when the visible stale
+    /// bit flips. No-op before the first populate.
+    pub fn mark_status_bar_tier2_stale(&self) -> bool {
         let mut tier2 = self.status_bar_tier2.borrow_mut();
         // No-op before the first full populate (nothing real to mark stale).
         if tier2.dead_code.is_some() && tier2.unused_exports.is_some() && tier2.duplicates.is_some()
         {
+            let changed = !tier2.stale;
             tier2.stale = true;
+            return changed;
         }
+        false
     }
 
     /// Refresh the cached Tier-2 + todos counts for the status bar. Each count

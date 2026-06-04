@@ -9,11 +9,11 @@ use aft::log_ctx;
 use aft::lsp::client::LspEvent;
 use aft::parser::TreeSitterProvider;
 use aft::protocol::{EchoParams, PushFrame, RawRequest, Response};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{self, BufRead, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -951,6 +951,90 @@ fn semantic_corpus_refresh_in_progress(ctx: &AppContext) -> bool {
     )
 }
 
+fn watcher_path_is_semantic_source(path: &std::path::Path) -> bool {
+    aft::semantic_index::is_semantic_indexed_extension(path)
+}
+
+fn semantic_refresh_retry_attempts() -> &'static Mutex<BTreeMap<std::path::PathBuf, usize>> {
+    static ATTEMPTS: OnceLock<Mutex<BTreeMap<std::path::PathBuf, usize>>> = OnceLock::new();
+    ATTEMPTS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Backoff for live semantic refresh retries after a transient embedding backend
+/// failure. Mirrors the cold-build retry cadence (15s -> 30s -> 60s capped) so
+/// a down backend cannot spin the watcher/refresh loop hot while still
+/// self-healing once the backend returns.
+fn semantic_refresh_retry_backoff(attempt: usize) -> Duration {
+    // Test seam, intentionally matching the build-level retry override.
+    if let Ok(raw) = std::env::var("AFT_SEMANTIC_RETRY_BACKOFF_MS") {
+        if let Ok(ms) = raw.parse::<u64>() {
+            return Duration::from_millis(ms);
+        }
+    }
+    const SCHEDULE_SECS: [u64; 3] = [15, 30, 60];
+    let secs = SCHEDULE_SECS
+        .get(attempt)
+        .copied()
+        .unwrap_or(*SCHEDULE_SECS.last().unwrap());
+    Duration::from_secs(secs)
+}
+
+fn next_semantic_refresh_retry_delay(paths: &[std::path::PathBuf]) -> Duration {
+    let attempt = if let Ok(mut attempts) = semantic_refresh_retry_attempts().lock() {
+        let attempt = paths
+            .iter()
+            .map(|path| attempts.get(path).copied().unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        for path in paths {
+            attempts.insert(path.clone(), attempt.saturating_add(1));
+        }
+        attempt
+    } else {
+        0
+    };
+    semantic_refresh_retry_backoff(attempt)
+}
+
+fn clear_semantic_refresh_retry_attempts(paths: &[std::path::PathBuf]) {
+    if let Ok(mut attempts) = semantic_refresh_retry_attempts().lock() {
+        for path in paths {
+            attempts.remove(path);
+        }
+    }
+}
+
+fn schedule_semantic_refresh_retry(
+    ctx: &AppContext,
+    paths: Vec<std::path::PathBuf>,
+    error: &str,
+) -> bool {
+    if paths.is_empty() {
+        return false;
+    }
+    let Some(sender) = ctx.semantic_refresh_sender() else {
+        return false;
+    };
+
+    let delay = next_semantic_refresh_retry_delay(&paths);
+    let clean = aft::semantic_index::strip_transient_embedding_marker(error);
+    aft::slog_warn!(
+        "semantic refresh hit a transient backend error ({}); retrying {} file(s) in {}ms",
+        clean,
+        paths.len(),
+        delay.as_millis(),
+    );
+
+    let session_id = log_ctx::current_session();
+    thread::spawn(move || {
+        log_ctx::with_session(session_id, || {
+            thread::sleep(delay);
+            let _ = sender.send(SemanticRefreshRequest::Files { paths });
+        });
+    });
+    true
+}
+
 #[cfg(debug_assertions)]
 fn delay_search_rebuild_publish_for_debug() {
     let Some(delay_ms) = std::env::var("AFT_TEST_SEARCH_REBUILD_PUBLISH_DELAY_MS")
@@ -1014,9 +1098,9 @@ fn spawn_search_corpus_refresh(
     });
 }
 
-fn refresh_corpus_after_ignore_change(ctx: &AppContext) {
+fn refresh_corpus_after_ignore_change(ctx: &AppContext) -> bool {
     let Some(root) = ctx.canonical_cache_root_opt() else {
-        return;
+        return false;
     };
     let config = ctx.config().clone();
     let mut status_changed = false;
@@ -1070,9 +1154,7 @@ fn refresh_corpus_after_ignore_change(ctx: &AppContext) {
         }
     }
 
-    if status_changed {
-        ctx.status_emitter().signal(ctx.build_status_snapshot());
-    }
+    status_changed
 }
 
 /// Borrows the watcher receiver and callgraph in separate phases to avoid
@@ -1129,8 +1211,9 @@ fn drain_watcher_events(ctx: &AppContext) {
     }; // receiver borrow dropped here
 
     let ignore_file_changed = filtered.ignore_file_changed;
+    let mut status_changed = false;
     if ignore_file_changed {
-        refresh_corpus_after_ignore_change(ctx);
+        status_changed |= refresh_corpus_after_ignore_change(ctx);
     }
 
     let changed = filtered.changed;
@@ -1140,6 +1223,9 @@ fn drain_watcher_events(ctx: &AppContext) {
         changed.len()
     };
     if changed.is_empty() {
+        if status_changed {
+            ctx.status_emitter().signal(ctx.build_status_snapshot());
+        }
         ctx.tick_tier2_refresh_scheduler(scheduler_changed_path_count);
         return;
     }
@@ -1147,14 +1233,16 @@ fn drain_watcher_events(ctx: &AppContext) {
     // A real source change makes the last-known Tier-2 counts stale until the
     // next background scan reconciles them — surface that in the status bar
     // immediately (the `~` marker) so the agent never reads them as live.
-    ctx.mark_status_bar_tier2_stale();
+    if ctx.mark_status_bar_tier2_stale() {
+        status_changed = true;
+    }
 
     if ctx.search_index_rx().borrow().is_some() {
         ctx.add_pending_search_index_paths(changed.iter().cloned());
     }
     let semantic_source_paths = changed
         .iter()
-        .filter(|path| watcher_path_is_source(path))
+        .filter(|path| watcher_path_is_semantic_source(path))
         .cloned()
         .collect::<Vec<_>>();
     let semantic_build_in_progress = ctx.semantic_index_rx().borrow().is_some();
@@ -1193,7 +1281,6 @@ fn drain_watcher_events(ctx: &AppContext) {
     }
 
     let mut semantic_index_ref = ctx.semantic_index().borrow_mut();
-    let mut semantic_status_changed = false;
     let mut semantic_refresh_paths = Vec::new();
     if let Some(index) = semantic_index_ref.as_mut() {
         let mut stale_paths = Vec::new();
@@ -1208,7 +1295,7 @@ fn drain_watcher_events(ctx: &AppContext) {
                     status.add_refreshing_file(path.clone());
                 }
                 semantic_refresh_paths = stale_paths;
-                semantic_status_changed = true;
+                status_changed = true;
             }
         }
     }
@@ -1231,8 +1318,8 @@ fn drain_watcher_events(ctx: &AppContext) {
     // when the store holds nothing for the path, so clearing unconditionally
     // for every vanished path is safe.
     for path in &changed {
-        if !path.exists() {
-            ctx.lsp_clear_diagnostics_for_file(path);
+        if !path.exists() && ctx.lsp_clear_diagnostics_for_file(path) {
+            status_changed = true;
         }
     }
 
@@ -1253,12 +1340,12 @@ fn drain_watcher_events(ctx: &AppContext) {
             for path in &semantic_refresh_paths {
                 status.cancel_refreshing_file(path);
             }
-            semantic_status_changed = true;
+            status_changed = true;
         }
     }
 
     aft::slog_info!("invalidated {} files", changed.len());
-    if semantic_status_changed {
+    if status_changed {
         ctx.status_emitter().signal(ctx.build_status_snapshot());
     }
     ctx.tick_tier2_refresh_scheduler(scheduler_changed_path_count);
@@ -1358,7 +1445,7 @@ fn drain_semantic_index_events(ctx: &AppContext) {
             SemanticIndexEvent::Ready(mut index) => {
                 let pending_paths = ctx.take_pending_semantic_index_paths();
                 for path in pending_paths {
-                    if watcher_path_is_source(&path) {
+                    if watcher_path_is_semantic_source(&path) {
                         index.invalidate_file(&path);
                         replay_refresh_paths.push(path);
                     }
@@ -1495,6 +1582,7 @@ fn drain_semantic_refresh_events(ctx: &AppContext) {
                 if let Some(index) = ctx.semantic_index().borrow_mut().as_mut() {
                     index.apply_refresh_update(added_entries, updated_metadata, &completed_paths);
                 }
+                clear_semantic_refresh_retry_attempts(&completed_paths);
                 let mut status = ctx.semantic_index_status().borrow_mut();
                 if matches!(&*status, SemanticIndexStatus::Ready { .. }) {
                     for path in &completed_paths {
@@ -1521,7 +1609,7 @@ fn drain_semantic_refresh_events(ctx: &AppContext) {
                 }
                 let pending_paths = ctx.take_pending_semantic_index_paths();
                 for path in pending_paths {
-                    if !watcher_path_is_source(&path) {
+                    if !watcher_path_is_semantic_source(&path) {
                         continue;
                     }
                     index.invalidate_file(&path);
@@ -1534,13 +1622,24 @@ fn drain_semantic_refresh_events(ctx: &AppContext) {
                 status_changed = true;
             }
             SemanticRefreshEvent::Failed { paths, error } => {
-                aft::slog_warn!("semantic refresh failed: {}", error);
-                let mut status = ctx.semantic_index_status().borrow_mut();
-                if matches!(&*status, SemanticIndexStatus::Ready { .. }) {
-                    for path in &paths {
-                        status.complete_refreshing_file(path);
+                if aft::semantic_index::embedding_failure_is_transient(&error) {
+                    if !schedule_semantic_refresh_retry(ctx, paths.clone(), &error) {
+                        aft::slog_warn!(
+                            "semantic refresh worker unavailable; preserving {} transiently failed file(s) for retry",
+                            paths.len(),
+                        );
+                        ctx.add_pending_semantic_index_paths(paths);
                     }
-                    status_changed = true;
+                } else {
+                    aft::slog_warn!("semantic refresh failed: {}", error);
+                    clear_semantic_refresh_retry_attempts(&paths);
+                    let mut status = ctx.semantic_index_status().borrow_mut();
+                    if matches!(&*status, SemanticIndexStatus::Ready { .. }) {
+                        for path in &paths {
+                            status.complete_refreshing_file(path);
+                        }
+                        status_changed = true;
+                    }
                 }
             }
             SemanticRefreshEvent::CorpusFailed { error } => {
@@ -1554,7 +1653,6 @@ fn drain_semantic_refresh_events(ctx: &AppContext) {
                 // real failure.
                 if aft::semantic_index::embedding_failure_is_transient(&error) {
                     let clean = aft::semantic_index::strip_transient_embedding_marker(&error);
-                    let _ = ctx.take_pending_semantic_index_paths();
                     let has_index = ctx.semantic_index().borrow().is_some();
                     if has_index {
                         aft::slog_warn!(
@@ -1616,11 +1714,12 @@ fn drain_semantic_refresh_events(ctx: &AppContext) {
 }
 
 fn drain_lsp_events(ctx: &AppContext) {
-    let events = {
+    let drained = {
         let mut lsp = ctx.lsp();
         lsp.drain_events()
     };
-    for event in events {
+    let mut status_changed = drained.diagnostics_changed;
+    for event in drained.events {
         match event {
             LspEvent::Notification {
                 server_kind,
@@ -1654,22 +1753,33 @@ fn drain_lsp_events(ctx: &AppContext) {
             }
             LspEvent::ServerExited { server_kind, root } => {
                 aft::slog_info!("exited {:?} {}", server_kind, root.display());
-                ctx.status_emitter().signal(ctx.build_status_snapshot());
+                status_changed = true;
             }
         }
+    }
+    if status_changed {
+        ctx.status_emitter().signal(ctx.build_status_snapshot());
     }
 }
 
 #[cfg(test)]
 mod watcher_filter_tests {
     use super::{
-        dispatch_panic_response, drain_configure_warning_events, filter_watcher_raw_paths,
-        watcher_event_invalidates, write_push_frame_or_request_shutdown,
+        dispatch_panic_response, drain_configure_warning_events, drain_semantic_refresh_events,
+        drain_watcher_events, filter_watcher_raw_paths, watcher_event_invalidates,
+        write_push_frame_or_request_shutdown,
     };
     use aft::config::Config;
-    use aft::context::AppContext;
+    use aft::context::{
+        AppContext, SemanticIndexStatus, SemanticRefreshEvent, SemanticRefreshRequest,
+        SemanticRefreshWorkerSlot,
+    };
+    use aft::lsp::diagnostics::{DiagnosticSeverity, StoredDiagnostic};
+    use aft::lsp::registry::ServerKind;
+    use aft::lsp::roots::ServerKey;
     use aft::parser::TreeSitterProvider;
     use aft::protocol::{ConfigureWarningsFrame, PushFrame};
+    use aft::semantic_index::SemanticIndex;
     use notify::event::{
         AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind, RemoveKind,
         RenameMode,
@@ -1685,6 +1795,92 @@ mod watcher_filter_tests {
                 ..Config::default()
             },
         )
+    }
+
+    fn install_watcher_rx(
+        ctx: &AppContext,
+    ) -> std::sync::mpsc::Sender<notify::Result<notify::Event>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        *ctx.watcher_rx().borrow_mut() = Some(rx);
+        tx
+    }
+
+    fn watcher_modify_event(path: std::path::PathBuf) -> notify::Event {
+        notify::Event {
+            kind: EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            paths: vec![path],
+            attrs: Default::default(),
+        }
+    }
+
+    fn install_semantic_refresh_channels(
+        ctx: &AppContext,
+    ) -> (
+        crossbeam_channel::Receiver<SemanticRefreshRequest>,
+        crossbeam_channel::Sender<SemanticRefreshEvent>,
+    ) {
+        let (request_tx, request_rx) = crossbeam_channel::unbounded();
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let worker_slot: SemanticRefreshWorkerSlot =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        ctx.install_semantic_refresh_worker(request_tx, event_rx, worker_slot);
+        (request_rx, event_tx)
+    }
+
+    fn status_frame_rx(ctx: &AppContext) -> std::sync::mpsc::Receiver<PushFrame> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        ctx.set_progress_sender(Some(std::sync::Arc::new(Box::new(move |frame| {
+            let _ = tx.send(frame);
+        }))));
+        rx
+    }
+
+    fn recv_status_changed(rx: &std::sync::mpsc::Receiver<PushFrame>) -> serde_json::Value {
+        match rx
+            .recv_timeout(std::time::Duration::from_millis(1_600))
+            .expect("status_changed frame")
+        {
+            PushFrame::StatusChanged(frame) => frame.snapshot,
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
+
+    fn err_diag(file: &std::path::Path) -> StoredDiagnostic {
+        StoredDiagnostic {
+            file: file.to_path_buf(),
+            line: 1,
+            column: 1,
+            end_line: 1,
+            end_column: 2,
+            severity: DiagnosticSeverity::Error,
+            message: "boom".into(),
+            code: None,
+            source: None,
+        }
+    }
+
+    fn with_semantic_retry_backoff_ms<R>(ms: u64, f: impl FnOnce() -> R) -> R {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("AFT_SEMANTIC_RETRY_BACKOFF_MS");
+        unsafe {
+            std::env::set_var("AFT_SEMANTIC_RETRY_BACKOFF_MS", ms.to_string());
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("AFT_SEMANTIC_RETRY_BACKOFF_MS", value),
+                None => std::env::remove_var("AFT_SEMANTIC_RETRY_BACKOFF_MS"),
+            }
+        }
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     }
 
     /// Run `f` with global git-ignore discovery neutralized.
@@ -1971,5 +2167,161 @@ mod watcher_filter_tests {
 
         assert!(changed.ignore_file_changed);
         assert!(changed.changed.is_empty());
+    }
+
+    #[test]
+    fn watcher_semantic_refresh_includes_vue_extension() {
+        let tmp = TempDir::new().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let file = root.join("App.vue");
+        std::fs::write(&file, "<script setup>const n = 1;</script>").unwrap();
+
+        let ctx = make_ctx_with_root(&root);
+        *ctx.semantic_index().borrow_mut() = Some(SemanticIndex::new(root.clone(), 3));
+        *ctx.semantic_index_status().borrow_mut() = SemanticIndexStatus::ready();
+        let (request_rx, _event_tx) = install_semantic_refresh_channels(&ctx);
+        let watcher_tx = install_watcher_rx(&ctx);
+        watcher_tx
+            .send(Ok(watcher_modify_event(file.clone())))
+            .unwrap();
+
+        drain_watcher_events(&ctx);
+
+        match request_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .expect("semantic refresh request")
+        {
+            SemanticRefreshRequest::Files { paths } => assert_eq!(paths, vec![file]),
+            SemanticRefreshRequest::Corpus { .. } => panic!("unexpected corpus refresh"),
+        }
+    }
+
+    #[test]
+    fn transient_file_refresh_failure_requeues_retry_without_completing() {
+        let tmp = TempDir::new().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let file = root.join("lib.rs");
+        std::fs::write(&file, "fn main() {}").unwrap();
+
+        with_semantic_retry_backoff_ms(1, || {
+            let ctx = make_ctx_with_root(&root);
+            let (request_rx, event_tx) = install_semantic_refresh_channels(&ctx);
+            let mut status = SemanticIndexStatus::ready();
+            status.add_refreshing_file(file.clone());
+            status.start_refreshing_file(file.clone());
+            *ctx.semantic_index_status().borrow_mut() = status;
+
+            event_tx
+                .send(SemanticRefreshEvent::Failed {
+                    paths: vec![file.clone()],
+                    error: format!(
+                        "{}backend unavailable",
+                        aft::semantic_index::TRANSIENT_EMBEDDING_MARKER
+                    ),
+                })
+                .unwrap();
+
+            drain_semantic_refresh_events(&ctx);
+
+            match request_rx
+                .recv_timeout(std::time::Duration::from_millis(250))
+                .expect("retry request")
+            {
+                SemanticRefreshRequest::Files { paths } => assert_eq!(paths, vec![file.clone()]),
+                SemanticRefreshRequest::Corpus { .. } => panic!("unexpected corpus refresh"),
+            }
+            assert_eq!(ctx.semantic_index_status().borrow().refreshing_count(), 1);
+        });
+    }
+
+    #[test]
+    fn transient_corpus_failure_preserves_pending_semantic_paths() {
+        let tmp = TempDir::new().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let file = root.join("pending.vue");
+        std::fs::write(&file, "<template />").unwrap();
+
+        let ctx = make_ctx_with_root(&root);
+        *ctx.semantic_index().borrow_mut() = Some(SemanticIndex::new(root.clone(), 3));
+        *ctx.semantic_index_status().borrow_mut() = SemanticIndexStatus::Building {
+            stage: "refreshing_corpus".into(),
+            files: Some(1),
+            entries_done: None,
+            entries_total: None,
+        };
+        ctx.add_pending_semantic_index_paths(vec![file.clone()]);
+        let (_request_rx, event_tx) = install_semantic_refresh_channels(&ctx);
+
+        event_tx
+            .send(SemanticRefreshEvent::CorpusFailed {
+                error: format!(
+                    "{}backend unavailable",
+                    aft::semantic_index::TRANSIENT_EMBEDDING_MARKER
+                ),
+            })
+            .unwrap();
+
+        drain_semantic_refresh_events(&ctx);
+
+        let pending = ctx.take_pending_semantic_index_paths();
+        assert_eq!(pending, vec![file]);
+        assert!(matches!(
+            &*ctx.semantic_index_status().borrow(),
+            SemanticIndexStatus::Ready { .. }
+        ));
+    }
+
+    #[test]
+    fn watcher_stale_mark_emits_status_without_semantic_change() {
+        let tmp = TempDir::new().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let file = root.join("notes.txt");
+        std::fs::write(&file, "changed").unwrap();
+
+        let ctx = make_ctx_with_root(&root);
+        ctx.update_status_bar_tier2(Some(1), Some(2), Some(3), Some(4), false);
+        let rx = status_frame_rx(&ctx);
+        let watcher_tx = install_watcher_rx(&ctx);
+        watcher_tx.send(Ok(watcher_modify_event(file))).unwrap();
+
+        drain_watcher_events(&ctx);
+
+        let snapshot = recv_status_changed(&rx);
+        assert_eq!(
+            snapshot["status_bar"]["tier2_stale"],
+            serde_json::Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn watcher_diagnostics_clear_emits_status_without_semantic_change() {
+        let tmp = TempDir::new().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let file = root.join("gone.txt");
+        std::fs::write(&file, "deleted").unwrap();
+
+        let ctx = make_ctx_with_root(&root);
+        ctx.update_status_bar_tier2(Some(1), Some(2), Some(3), Some(4), true);
+        {
+            let key = ServerKey {
+                kind: ServerKind::TypeScript,
+                root: root.clone(),
+            };
+            let mut lsp = ctx.lsp();
+            lsp.diagnostics_store_mut_for_test()
+                .publish(key, file.clone(), vec![err_diag(&file)]);
+        }
+        assert_eq!(ctx.status_bar_counts().unwrap().errors, 1);
+
+        std::fs::remove_file(&file).unwrap();
+        let rx = status_frame_rx(&ctx);
+        let watcher_tx = install_watcher_rx(&ctx);
+        watcher_tx.send(Ok(watcher_modify_event(file))).unwrap();
+
+        drain_watcher_events(&ctx);
+
+        let snapshot = recv_status_changed(&rx);
+        assert_eq!(snapshot["status_bar"]["errors"], serde_json::Value::from(0));
+        assert_eq!(ctx.status_bar_counts().unwrap().errors, 0);
     }
 }
