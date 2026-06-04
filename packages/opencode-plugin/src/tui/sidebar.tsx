@@ -180,13 +180,30 @@ export function collapsedCompressionValue(
   return `${formatCount(savings_tokens)} / ${pct}%`;
 }
 
-// Compact one-line code-health glance for the collapsed view — mirrors the
-// agent status bar shape `E· W· | D· U· C· | T·` with a leading `~` when the
-// Tier-2 counts predate the latest edit. Returns null until populated.
-export function collapsedStatusBarValue(statusBar: StatusBar | undefined): string | null {
+export type HealthLightTone = "ok" | "warn" | "err";
+
+export interface HealthLights {
+  // Diagnostics: red if any errors, yellow if any warnings, else green.
+  diagnostics: HealthLightTone;
+  // Code cruft: yellow if there is any dead code / unused export / duplicate,
+  // green when all three are zero. Never red — cruft is not a build failure.
+  code: HealthLightTone;
+  // TODOs: yellow if any, else green.
+  todos: HealthLightTone;
+}
+
+// Three traffic lights for the collapsed view, replacing the cramped
+// `E· W· | D· U· C· | T·` string. Returns null until populated.
+export function collapsedHealthLights(statusBar: StatusBar | undefined): HealthLights | null {
   if (!statusBar) return null;
-  const stale = statusBar.tier2_stale ? "~" : "";
-  return `E${statusBar.errors} W${statusBar.warnings} | ${stale}D${statusBar.dead_code} U${statusBar.unused_exports} C${statusBar.duplicates} | T${statusBar.todos}`;
+  const diagnostics: HealthLightTone =
+    statusBar.errors > 0 ? "err" : statusBar.warnings > 0 ? "warn" : "ok";
+  const code: HealthLightTone =
+    statusBar.dead_code > 0 || statusBar.unused_exports > 0 || statusBar.duplicates > 0
+      ? "warn"
+      : "ok";
+  const todos: HealthLightTone = statusBar.todos > 0 ? "warn" : "ok";
+  return { diagnostics, code, todos };
 }
 
 // v0.27 moved AFT storage to the CortexKit root. TUI code must use a
@@ -555,11 +572,17 @@ const SidebarContent = (props: {
               </text>
             </CollapsedRow>
           )}
-          {collapsedStatusBarValue(statusBar()) && (
-            <CollapsedRow theme={props.theme} label="Health">
-              <text fg={statusBar()!.errors > 0 ? props.theme.error : props.theme.textMuted}>
-                <b>{collapsedStatusBarValue(statusBar())}</b>
-              </text>
+          {collapsedHealthLights(statusBar()) && (
+            <CollapsedRow theme={props.theme} label="Code Health">
+              <box flexDirection="row" gap={1}>
+                <text fg={toneColor(props.theme, collapsedHealthLights(statusBar())!.diagnostics)}>
+                  ●
+                </text>
+                <text fg={toneColor(props.theme, collapsedHealthLights(statusBar())!.code)}>●</text>
+                <text fg={toneColor(props.theme, collapsedHealthLights(statusBar())!.todos)}>
+                  ●
+                </text>
+              </box>
             </CollapsedRow>
           )}
         </box>

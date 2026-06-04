@@ -30,7 +30,7 @@ mock.module("solid-js", () => ({
 
 const {
   collapsedCompressionValue,
-  collapsedStatusBarValue,
+  collapsedHealthLights,
   formatCompressionSidebarRows,
   resolveTuiStorageDir,
   scopedSidebarSnapshot,
@@ -179,7 +179,7 @@ describe("collapsedCompressionValue (collapsed sidebar row)", () => {
   });
 });
 
-describe("collapsedStatusBarValue (collapsed Code Health row)", () => {
+describe("collapsedHealthLights (collapsed Code Health traffic lights)", () => {
   const bar = (overrides = {}) => ({
     errors: 0,
     warnings: 0,
@@ -192,25 +192,39 @@ describe("collapsedStatusBarValue (collapsed Code Health row)", () => {
   });
 
   test("returns null when status bar is undefined (Tier-2 not populated)", () => {
-    expect(collapsedStatusBarValue(undefined)).toBeNull();
+    expect(collapsedHealthLights(undefined)).toBeNull();
   });
 
-  test("renders the agent-bar glance shape", () => {
-    const value = collapsedStatusBarValue(
-      bar({
-        errors: 7,
-        warnings: 13,
-        dead_code: 334,
-        unused_exports: 222,
-        duplicates: 1167,
-        todos: 0,
-      }),
-    );
-    expect(value).toBe("E7 W13 | D334 U222 C1167 | T0");
+  test("all green on a clean bar", () => {
+    expect(collapsedHealthLights(bar())).toEqual({
+      diagnostics: "ok",
+      code: "ok",
+      todos: "ok",
+    });
   });
 
-  test("prefixes Tier-2 trio with ~ when stale", () => {
-    const value = collapsedStatusBarValue(bar({ dead_code: 5, tier2_stale: true }));
-    expect(value).toBe("E0 W0 | ~D5 U0 C0 | T0");
+  test("diagnostics light: red on errors (wins over warnings)", () => {
+    expect(collapsedHealthLights(bar({ errors: 2, warnings: 5 }))?.diagnostics).toBe("err");
+  });
+
+  test("diagnostics light: yellow on warnings only", () => {
+    expect(collapsedHealthLights(bar({ warnings: 3 }))?.diagnostics).toBe("warn");
+  });
+
+  test("code light: yellow when any Tier-2 category is non-zero", () => {
+    expect(collapsedHealthLights(bar({ dead_code: 1 }))?.code).toBe("warn");
+    expect(collapsedHealthLights(bar({ unused_exports: 1 }))?.code).toBe("warn");
+    expect(collapsedHealthLights(bar({ duplicates: 1167 }))?.code).toBe("warn");
+  });
+
+  test("code light: green only when all three Tier-2 categories are zero", () => {
+    expect(
+      collapsedHealthLights(bar({ dead_code: 0, unused_exports: 0, duplicates: 0 }))?.code,
+    ).toBe("ok");
+  });
+
+  test("todos light: yellow when any todos, green otherwise", () => {
+    expect(collapsedHealthLights(bar({ todos: 4 }))?.todos).toBe("warn");
+    expect(collapsedHealthLights(bar({ todos: 0 }))?.todos).toBe("ok");
   });
 });
