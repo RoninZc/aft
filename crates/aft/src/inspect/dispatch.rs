@@ -22,6 +22,13 @@ pub fn start_dispatch_loop(worker: InspectWorker) -> DispatchHandles {
         rayon::ThreadPoolBuilder::new()
             .num_threads(default_pool_size())
             .thread_name(|index| format!("aft-inspect-{index}"))
+            // Rayon defaults workers to ~2MB stacks (vs the main thread's 8MB).
+            // The duplicates scanner walks the AST recursively, and deep trees
+            // (minified bundles, generated code, long chains) previously
+            // overflowed a 2MB worker stack and SIGABRT'd the whole bridge.
+            // Match the main thread's 8MB so the bounded recursion in
+            // collect_fragments (MAX_FRAGMENT_DEPTH) has comfortable headroom.
+            .stack_size(8 * 1024 * 1024)
             .build()
             .expect("inspect worker pool must build"),
     );

@@ -352,6 +352,23 @@ fn is_retryable_embedding_status(status: reqwest::StatusCode) -> bool {
     status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
 }
 
+/// Local backends (LM Studio, Ollama, llama.cpp) return a 4xx — usually 400 —
+/// while a model is loading or was just unloaded, with a body message like
+/// "Model was unloaded while the request was still in queue" or "model is
+/// loading". These are transient (the model will reload), not the permanent
+/// misconfigurations a 4xx normally signals, so we ride them out instead of
+/// parking the index in `Failed`. Matched case-insensitively on the response
+/// body so a mid-build model swap self-heals.
+fn embedding_response_body_is_transient(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    lower.contains("model was unloaded")
+        || lower.contains("model is loading")
+        || lower.contains("model not loaded")
+        || lower.contains("loading model")
+        || lower.contains("is currently loading")
+        || lower.contains("model is being loaded")
+}
+
 fn is_retryable_embedding_error(error: &reqwest::Error) -> bool {
     error.is_connect()
 }
@@ -432,15 +449,21 @@ where
             return Ok(raw);
         }
 
-        if !last_attempt && is_retryable_embedding_status(status) {
+        // A 4xx whose body says the model is loading/unloaded is transient on
+        // local backends (LM Studio/Ollama), so treat it like a retryable
+        // status: ride it out at both the in-request and build-retry layers.
+        let body_transient = embedding_response_body_is_transient(&raw);
+        if !last_attempt && (is_retryable_embedding_status(status) || body_transient) {
             sleep_before_embedding_retry(attempt_index);
             continue;
         }
 
         // 5xx / 429 are server-side and transient — the backend is overloaded
-        // or briefly unavailable, not misconfigured. 4xx (auth, bad request,
-        // model-not-found) is a real error the user must fix; no marker.
-        let marker = if is_retryable_embedding_status(status) {
+        // or briefly unavailable, not misconfigured. A 4xx whose body indicates
+        // the model is (un)loading is also transient (local backend mid-swap).
+        // Other 4xx (auth, bad request, model-not-found) is a real error the
+        // user must fix; no marker.
+        let marker = if is_retryable_embedding_status(status) || body_transient {
             TRANSIENT_EMBEDDING_MARKER
         } else {
             ""
@@ -3050,6 +3073,35 @@ mod tests {
         assert!(!is_retryable_embedding_status(
             reqwest::StatusCode::BAD_REQUEST
         ));
+    }
+
+    #[test]
+    fn local_backend_model_loading_body_is_transient() {
+        // LM Studio / Ollama return a 4xx with a loading/unloaded message while
+        // the model swaps; these must classify transient so the build self-heals.
+        for body in [
+            r#"{"error":"Model was unloaded while the request was still in queue.."}"#,
+            r#"{"error":"model is loading, please wait"}"#,
+            r#"{"error":"Model not loaded"}"#,
+            "Loading model into memory",
+        ] {
+            assert!(
+                embedding_response_body_is_transient(body),
+                "{body:?} should be body-transient"
+            );
+        }
+
+        // A genuine 4xx misconfiguration body must NOT be treated as transient.
+        for body in [
+            r#"{"error":"invalid api key"}"#,
+            r#"{"error":"model 'foo' not found"}"#,
+            "Bad Request: unknown field",
+        ] {
+            assert!(
+                !embedding_response_body_is_transient(body),
+                "{body:?} must not be body-transient"
+            );
+        }
     }
 
     fn start_mock_http_server<F>(handler: F) -> (String, thread::JoinHandle<()>)

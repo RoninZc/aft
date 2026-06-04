@@ -18,6 +18,15 @@ use crate::parser::{detect_language, grammar_for, LangId};
 
 const LOWER_BOUND: u32 = 20;
 const MAX_COST: u32 = 7_000;
+// Defensive recursion bound for `collect_fragments`. Hand-written code nests
+// only tens of levels deep, but minified bundles, generated code, and very long
+// operator/promise chains can produce trees thousands of nodes deep. The inspect
+// rayon pool uses bounded worker stacks, so unbounded AST recursion here can
+// overflow the stack and SIGABRT the entire bridge. Past this depth we stop
+// descending and treat the node as an opaque leaf — duplicate detection inside
+// such pathological nesting is noise anyway. Kept well under the pool's stack
+// budget (see dispatch.rs stack_size).
+const MAX_FRAGMENT_DEPTH: u32 = 1_500;
 const MAX_GROUP_ITEMS: usize = 100;
 const VARIABLE_SENTINEL: &str = "_var";
 const FIELD_SENTINEL: &str = "_field";
@@ -130,7 +139,7 @@ fn scan_file(job: &InspectJob, path: &Path) -> Result<FileScan, String> {
         .map_err(|error| format!("read failed for {}: {error}", path.display()))?;
     let tree = parse_source(path, lang, &source)?;
     let mut fragments = Vec::new();
-    collect_fragments(tree.root_node(), &source, lang, &mut fragments);
+    collect_fragments(tree.root_node(), &source, lang, &mut fragments, 0);
     fragments.sort_by(|left, right| {
         left.start_line
             .cmp(&right.start_line)
@@ -163,15 +172,28 @@ fn collect_fragments(
     source: &str,
     lang: LangId,
     fragments: &mut Vec<DuplicateFragment>,
+    depth: u32,
 ) -> NodeDigest {
     let mut cost = node_cost(lang, node.kind());
+    // Stop descending past MAX_FRAGMENT_DEPTH to avoid overflowing the bounded
+    // inspect worker stack on pathologically deep trees (minified bundles,
+    // generated code, long chains). Hash the node as an opaque leaf so the
+    // parent digest stays deterministic; we simply do not emit fragments from
+    // the truncated subtree.
+    if depth >= MAX_FRAGMENT_DEPTH {
+        let leaf = leaf_hash_text(node, source);
+        return NodeDigest {
+            hash: hash_node(node.kind(), &[], Some(&leaf)),
+            cost,
+        };
+    }
     let mut child_hashes = Vec::new();
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.is_extra() {
             continue;
         }
-        let child_digest = collect_fragments(child, source, lang, fragments);
+        let child_digest = collect_fragments(child, source, lang, fragments, depth + 1);
         cost = cost.saturating_add(child_digest.cost);
         child_hashes.push(child_digest.hash);
     }
@@ -665,5 +687,42 @@ mod tests {
         assert_eq!(group_count(&aggregate), 1, "aggregate: {aggregate:#}");
         // The surfaced group is the child, not either unique block.
         assert_eq!(aggregate["items"][0]["cost"], 400);
+    }
+
+    #[test]
+    fn deeply_nested_tree_does_not_overflow_stack() {
+        // Regression for the inspect-thread stack overflow / SIGABRT: a
+        // pathologically deep expression (here ~6000 nested parentheses, far
+        // past MAX_FRAGMENT_DEPTH) must not recurse unbounded. Before the depth
+        // guard this overflowed the bounded inspect worker stack and aborted the
+        // whole process. We run it on the current (main) thread, which has a
+        // larger stack than rayon workers, but the guard is what makes it safe
+        // on the bounded pool. Reaching the assert at all proves no overflow.
+        let depth = 6_000usize;
+        let mut source = String::with_capacity(depth * 2 + 32);
+        source.push_str("const x = ");
+        for _ in 0..depth {
+            source.push('(');
+        }
+        source.push('1');
+        for _ in 0..depth {
+            source.push(')');
+        }
+        source.push_str(";\n");
+
+        let lang = LangId::TypeScript;
+        let tree = parse_source(Path::new("deep.ts"), lang, &source).expect("parse deep source");
+        let mut fragments = Vec::new();
+        // Must return instead of overflowing. Run in a bounded-stack thread to
+        // mirror the inspect pool and prove the guard (not just a big stack)
+        // is doing the work.
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                collect_fragments(tree.root_node(), &source, lang, &mut fragments, 0);
+            })
+            .expect("spawn bounded-stack worker")
+            .join()
+            .expect("deep-tree scan must not overflow the bounded stack");
     }
 }
