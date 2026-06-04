@@ -196,6 +196,20 @@ pub struct PullWorkspaceResult {
     pub supports_workspace: bool,
 }
 
+pub struct DrainedLspEvents {
+    pub events: Vec<LspEvent>,
+    pub diagnostics_changed: bool,
+}
+
+impl IntoIterator for DrainedLspEvents {
+    type Item = LspEvent;
+    type IntoIter = std::vec::IntoIter<LspEvent>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.events.into_iter()
+    }
+}
+
 pub struct LspManager {
     /// Active server instances, keyed by (ServerKind, workspace_root).
     clients: HashMap<ServerKey, LspClient>,
@@ -713,13 +727,19 @@ impl LspManager {
     }
 
     /// Drain all pending LSP events. Call from the main loop.
-    pub fn drain_events(&mut self) -> Vec<LspEvent> {
+    pub fn drain_events(&mut self) -> DrainedLspEvents {
         let mut events = Vec::new();
+        let mut diagnostics_changed = false;
         while let Ok(event) = self.event_rx.try_recv() {
-            self.handle_event(&event);
+            if self.handle_event(&event).is_some() {
+                diagnostics_changed = true;
+            }
             events.push(event);
         }
-        events
+        DrainedLspEvents {
+            events,
+            diagnostics_changed,
+        }
     }
 
     /// Wait for diagnostics to arrive for a specific file until a timeout expires.
@@ -751,7 +771,6 @@ impl LspManager {
     }
 
     #[doc(hidden)]
-    #[cfg(test)]
     pub fn diagnostics_store_mut_for_test(&mut self) -> &mut DiagnosticsStore {
         &mut self.diagnostics
     }
@@ -1859,7 +1878,9 @@ mod clear_diagnostics_tests {
     use std::path::PathBuf;
 
     use super::LspManager;
+    use crate::lsp::client::LspEvent;
     use crate::lsp::diagnostics::{DiagnosticSeverity, StoredDiagnostic};
+    use crate::lsp::position::uri_for_path;
     use crate::lsp::registry::ServerKind;
     use crate::lsp::roots::ServerKey;
 
@@ -1919,5 +1940,56 @@ mod clear_diagnostics_tests {
         let mut manager = LspManager::new();
         assert!(!manager.clear_diagnostics_for_file(&PathBuf::from("/nope/missing.ts")));
         assert_eq!(manager.warm_error_warning_counts(), (0, 0));
+    }
+
+    #[test]
+    fn drain_events_reports_publish_diagnostics_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let file = root.join("main.ts");
+        std::fs::write(&file, "const x: number = 'nope';").unwrap();
+
+        let mut manager = LspManager::new();
+        let diagnostic = lsp_types::Diagnostic {
+            range: lsp_types::Range {
+                start: lsp_types::Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: lsp_types::Position {
+                    line: 0,
+                    character: 1,
+                },
+            },
+            severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("test".into()),
+            message: "boom".into(),
+            related_information: None,
+            tags: None,
+            data: None,
+        };
+        let params = serde_json::to_value(lsp_types::PublishDiagnosticsParams {
+            uri: uri_for_path(&file).unwrap(),
+            diagnostics: vec![diagnostic],
+            version: Some(1),
+        })
+        .unwrap();
+        manager
+            .event_tx
+            .send(LspEvent::Notification {
+                server_kind: ServerKind::TypeScript,
+                root,
+                method: "textDocument/publishDiagnostics".into(),
+                params: Some(params),
+            })
+            .unwrap();
+
+        let drained = manager.drain_events();
+
+        assert!(drained.diagnostics_changed);
+        assert_eq!(drained.events.len(), 1);
+        assert_eq!(manager.warm_error_warning_counts(), (1, 0));
     }
 }
