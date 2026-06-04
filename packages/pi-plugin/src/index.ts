@@ -666,6 +666,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   // Eager async configure: warm the bridge for `process.cwd()` so the first
   // tool call doesn't pay the spawn + configure latency. Errors are swallowed —
   // the next real tool call will surface a proper error.
+  //
+  // AUDIT NOTE (intentional — do not flag as a bug): unlike the OpenCode
+  // plugin, Pi keeps eager warmup ON PURPOSE. Pi runs one bridge per process
+  // (one session per process) and has no OpenCode-Desktop-style sidebar that
+  // multiplies plugin instances across many projects/worktrees. The reason
+  // OpenCode went lazy (avoid spawning N bridges for N sidebar projects at
+  // startup) does not apply here, so eager warmup is the correct trade for Pi:
+  // it removes first-tool-call latency without the bridge-storm downside.
+  // The $HOME guard below is the only case we skip. See the home-dir note.
   void (async () => {
     try {
       // Note #65: skip eager configure when Pi was launched from the user's
