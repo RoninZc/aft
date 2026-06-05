@@ -3280,16 +3280,21 @@ mod tests {
                     Ok((mut stream, _)) => {
                         accepted += 1;
                         let mut buf = [0u8; 4096];
-                        let _ = stream.read(&mut buf).expect("read request");
+                        // The client (under test) uses a 250ms timeout and drops
+                        // the connection when the truncated body never completes.
+                        // On Windows that disconnect surfaces as a hard socket
+                        // error (WSAECONNRESET) on these read/write calls, where
+                        // Unix returns a clean EOF. Tolerate both: the mock does
+                        // not need the request bytes, and a write to an
+                        // already-hung-up client is expected.
+                        let _ = stream.read(&mut buf);
                         let response = "HTTP/1.1 200 OK
 Content-Type: application/json
 Content-Length: 128
 Connection: close
 
 {";
-                        stream
-                            .write_all(response.as_bytes())
-                            .expect("write truncated response");
+                        let _ = stream.write_all(response.as_bytes());
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
