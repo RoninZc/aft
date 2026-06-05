@@ -700,8 +700,10 @@ impl InspectManager {
             if scan_job.category == InspectCategory::DeadCode
                 && scan_job.callgraph_snapshot.is_none()
             {
-                scan_job.callgraph_snapshot =
-                    Some(build_tier2_callgraph_snapshot(&scan_job.project_root));
+                scan_job.callgraph_snapshot = build_tier2_callgraph_snapshot(
+                    &scan_job.project_root,
+                    scan_job.config.max_callgraph_files,
+                );
             }
             aggregate_job.callgraph_snapshot = scan_job.callgraph_snapshot.clone();
             #[cfg(debug_assertions)]
@@ -772,8 +774,10 @@ impl InspectManager {
                 if rescan_job.category == InspectCategory::DeadCode
                     && rescan_job.callgraph_snapshot.is_none()
                 {
-                    rescan_job.callgraph_snapshot =
-                        Some(build_tier2_callgraph_snapshot(&rescan_job.project_root));
+                    rescan_job.callgraph_snapshot = build_tier2_callgraph_snapshot(
+                        &rescan_job.project_root,
+                        rescan_job.config.max_callgraph_files,
+                    );
                 }
                 let scan_result = run_tier2_scan(&rescan_job);
                 let scan_success = scan_result.outcome.map_err(|message| {
@@ -812,8 +816,10 @@ impl InspectManager {
         if aggregate_job.category == InspectCategory::DeadCode
             && aggregate_job.callgraph_snapshot.is_none()
         {
-            aggregate_job.callgraph_snapshot =
-                Some(build_tier2_callgraph_snapshot(&aggregate_job.project_root));
+            aggregate_job.callgraph_snapshot = build_tier2_callgraph_snapshot(
+                &aggregate_job.project_root,
+                aggregate_job.config.max_callgraph_files,
+            );
         }
         let contributions = load_contributions(cache, &aggregate_job)?;
         let aggregate = roll_up_tier2_contributions(&aggregate_job, &contributions);
@@ -1150,10 +1156,27 @@ fn log_tier2_benchmark_category_end(result: &InspectResult) {
     }
 }
 
-fn build_tier2_callgraph_snapshot(project_root: &Path) -> Arc<CallgraphSnapshot> {
+fn build_tier2_callgraph_snapshot(
+    project_root: &Path,
+    max_callgraph_files: usize,
+) -> Option<Arc<CallgraphSnapshot>> {
     let started = Instant::now();
     let mut graph = CallGraph::new(project_root.to_path_buf());
     let graph_files = graph.project_files().to_vec();
+    // Interim #86 guard: the per-file parse + cross-file resolve loop below is the
+    // unbounded multi-core CPU sink on large repos (the interactive call graph already
+    // self-caps at the same threshold). Skipping above the cap returns None, which
+    // dead_code surfaces honestly as `callgraph_available: false` rather than a partial
+    // (silently-corrupt) graph. The file-discovery walk above is cheap; the parse loop is
+    // the cost we avoid. `--force`/UNCAPPED (1e9) keeps full builds for benchmarks.
+    if graph_files.len() > max_callgraph_files {
+        crate::slog_info!(
+            "tier2 dead_code: skipping callgraph snapshot — {} files exceeds max_callgraph_files={}; reporting dead_code as callgraph_unavailable (raise lsp.max_callgraph_files or scope the repo)",
+            graph_files.len(),
+            max_callgraph_files
+        );
+        return None;
+    }
     if tier2_benchmark_logging_enabled() {
         crate::slog_info!(
             "settle bench: tier2_callgraph_snapshot_start files={}",
@@ -1267,13 +1290,13 @@ fn build_tier2_callgraph_snapshot(project_root: &Path) -> Arc<CallgraphSnapshot>
         );
     }
 
-    Arc::new(CallgraphSnapshot {
+    Some(Arc::new(CallgraphSnapshot {
         generated_at: Some(SystemTime::now()),
         files,
         exported_symbols,
         outbound_calls,
         entry_points,
-    })
+    }))
 }
 
 fn canonicalize_for_snapshot(path: &PathBuf) -> PathBuf {
@@ -2012,4 +2035,45 @@ fn display_file_from_occurrence(value: &str) -> &str {
 #[allow(dead_code)]
 fn normalize_scope_root(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| normalize_path(path))
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    fn write_ts_project(file_count: usize) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        for i in 0..file_count {
+            std::fs::write(
+                root.join(format!("mod{i}.ts")),
+                format!("export function f{i}() {{ return {i}; }}\n"),
+            )
+            .expect("write fixture");
+        }
+        dir
+    }
+
+    #[test]
+    fn callgraph_snapshot_skips_above_max_callgraph_files() {
+        // Interim #86 guard: above the cap, the expensive parse loop is skipped and
+        // None is returned (dead_code then reports callgraph_available: false).
+        let dir = write_ts_project(3);
+        let snapshot = build_tier2_callgraph_snapshot(dir.path(), 1);
+        assert!(
+            snapshot.is_none(),
+            "3 files with max=1 must skip the snapshot build"
+        );
+    }
+
+    #[test]
+    fn callgraph_snapshot_builds_at_or_below_max_callgraph_files() {
+        // Below the cap the snapshot builds normally (real edges, not skipped).
+        let dir = write_ts_project(3);
+        let snapshot = build_tier2_callgraph_snapshot(dir.path(), 5000);
+        assert!(
+            snapshot.is_some(),
+            "3 files with max=5000 must build the snapshot"
+        );
+    }
 }
