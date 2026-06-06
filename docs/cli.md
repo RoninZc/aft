@@ -4,12 +4,12 @@ The unified `@cortexkit/aft` CLI works across every supported harness:
 
 | Command | What it does |
 |---|---|
-| `npx @cortexkit/aft setup` | Interactive first-time setup — auto-detects installed harnesses and registers AFT with each |
-| `npx @cortexkit/aft doctor` | Read-only health check across all detected harnesses (host install, plugin registration, binary cache, ONNX, config) |
-| `npx @cortexkit/aft doctor --fix` | Auto-fix what doctor can: register missing plugin entries, download a missing `aft` binary, repair ONNX Runtime |
-| `npx @cortexkit/aft doctor lsp <file>` | Show exactly which LSP servers AFT would spawn for a file, where each binary resolves, and why a server failed to start |
-| `npx @cortexkit/aft doctor --clear` | Interactive cache cleanup — pick which caches to clear (plugin packages, binary, LSP, semantic) |
-| `npx @cortexkit/aft doctor --issue` | Collect diagnostics and open a GitHub issue with sanitized logs |
+| `npx @cortexkit/aft@latest setup` | Interactive first-time setup — auto-detects installed harnesses and registers AFT with each |
+| `npx @cortexkit/aft@latest doctor` | Read-only health check across all detected harnesses (host install, plugin registration, binary cache, ONNX, config) |
+| `npx @cortexkit/aft@latest doctor --fix` | Auto-fix what doctor can: register missing plugin entries, download a missing `aft` binary, repair ONNX Runtime |
+| `npx @cortexkit/aft@latest doctor lsp <file>` | Show exactly which LSP servers AFT would spawn for a file, where each binary resolves, and why a server failed to start |
+| `npx @cortexkit/aft@latest doctor --clear` | Interactive cache cleanup — pick which caches to clear (plugin packages, binary, LSP, semantic) |
+| `npx @cortexkit/aft@latest doctor --issue` | Collect diagnostics and open a GitHub issue with sanitized logs |
 
 Add `--harness opencode` or `--harness pi` to any command to target one harness explicitly.
 
@@ -41,7 +41,7 @@ spawned. Pass `--harness opencode` or `--harness pi` if you have both plugins in
 need to disambiguate. Example output:
 
 ```
-$ npx @cortexkit/aft doctor lsp ./python/main.py
+$ npx @cortexkit/aft@latest doctor lsp ./python/main.py
 
 Server attempts:
   ✗ ty

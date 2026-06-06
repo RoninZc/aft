@@ -280,10 +280,10 @@ flows through five tiers in order:
    `aws`, `curl`, `wget`, `deno`, `pip`, `uv`, `psql`. User-supplied filters at
    `<storage_dir>/filters/*.toml` override built-ins; project-supplied filters at
    `<project>/.aft/filters/*.toml` override both but require explicit trust via
-   `npx @cortexkit/aft doctor filters trust`.
+   `npx @cortexkit/aft@latest doctor filters trust`.
 5. **Generic fallback** — ANSI stripping plus consecutive-line deduplication and middle-truncate.
 
-Use `npx @cortexkit/aft doctor filters` to inspect what's loaded for the current project. Pass
+Use `npx @cortexkit/aft@latest doctor filters` to inspect what's loaded for the current project. Pass
 `compressed: false` on a bash call to opt out for that invocation.
 
 #### Writing a custom TOML filter
@@ -318,8 +318,8 @@ strip = true                          # default true
 
 Project filters under `.aft/filters/` are an attack vector — a malicious repo could ship a filter
 that strips real failures and replaces them with `tests: ok`. AFT therefore **only loads project
-filters from explicitly trusted projects**. Run `npx @cortexkit/aft doctor filters trust` to
-review and approve them. Inspect the active set with `npx @cortexkit/aft doctor filters` and dump
+filters from explicitly trusted projects**. Run `npx @cortexkit/aft@latest doctor filters trust` to
+review and approve them. Inspect the active set with `npx @cortexkit/aft@latest doctor filters` and dump
 a single filter's resolved content with `--show <name>`.
 
 **Background** — when the background flag is enabled, pass `background: true` to spawn detached.
@@ -448,7 +448,7 @@ install the relevant LSP server (see warnings on plugin startup). `total: 0` wit
 `push_only` means the file is genuinely clean.
 
 When the response looks unhelpful and you can't tell which case applies, run
-`npx @cortexkit/aft doctor lsp <file>` for a per-file triage that names the binary
+`npx @cortexkit/aft@latest doctor lsp <file>` for a per-file triage that names the binary
 resolution path, workspace root markers, and spawn outcome for every server registered for
 that extension.
 
