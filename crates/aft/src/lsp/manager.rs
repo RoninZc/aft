@@ -782,6 +782,17 @@ impl LspManager {
         self.diagnostics.error_warning_counts()
     }
 
+    /// Status-bar error/warning counts with a per-file `keep` predicate and
+    /// cross-server dedup applied (see
+    /// [`DiagnosticsStore::filtered_error_warning_counts`]). The caller supplies
+    /// the project-root + tsconfig-membership policy via `keep`.
+    pub fn filtered_error_warning_counts(
+        &self,
+        keep: impl FnMut(&std::path::Path) -> bool,
+    ) -> (usize, usize) {
+        self.diagnostics.filtered_error_warning_counts(keep)
+    }
+
     /// Snapshot the current per-server epoch for every entry that exists
     /// for `file_path`. Servers without an entry yet (never published)
     /// are absent from the map; for those, `pre = 0` (any first publish

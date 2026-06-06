@@ -304,3 +304,94 @@ fn inspect_diagnostics_malformed_tsconfig_falls_through() {
         "malformed tsconfig should fall through instead of skipping: {response:#}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Status-bar E/W parity (v0.35): the agent status bar must agree with
+// `tsc`/`aft_inspect`, not raw LSP. These exercise the real
+// `AppContext::status_bar_counts()` path end to end.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn status_bar_counts_filter_build_excluded_files() {
+    let (_temp_dir, root) = fixture_project();
+    // tsconfig.json includes only `.ts` under src/ and excludes test files.
+    // The `.tsx` is NOT in `include` and the `.test.ts` is excluded: both are
+    // out-of-build, exactly the magic-context shape that produced the false E55.
+    write_file(
+        &root,
+        "pkg/tsconfig.json",
+        r#"{
+          "include": ["src/**/*.ts"],
+          "exclude": ["src/**/*.test.ts"]
+        }"#,
+    );
+    let included = write_file(&root, "pkg/src/app.ts", "export const app = 1;\n");
+    let excluded_test = write_file(
+        &root,
+        "pkg/src/app.test.ts",
+        "import { test } from 'bun:test';\ntest('x', () => import.meta.dir);\n",
+    );
+    let excluded_tsx = write_file(&root, "pkg/src/widget.tsx", "export const w = 1;\n");
+    let ctx = configured_context(&root);
+    configure_fake_typescript_lsp(&ctx);
+
+    // Each opened file gets one fake error published into the warm set.
+    open_with_lsp(&ctx, &included, "export const app = 1;\n");
+    open_with_lsp(&ctx, &excluded_test, "export const t = 1;\n");
+    open_with_lsp(&ctx, &excluded_tsx, "export const w = 1;\n");
+
+    // Seed Tier-2 so the bar surfaces at all (it is gated on Tier-2 presence).
+    ctx.update_status_bar_tier2(Some(0), Some(0), Some(0), Some(0), false);
+
+    let counts = ctx
+        .status_bar_counts()
+        .expect("status bar surfaces once Tier-2 is seeded");
+
+    // The fake LSP publishes 1 error + 1 warning per opened file on didOpen, so
+    // the raw union here is 3 errors + 3 warnings across the three files. Only
+    // the in-build `app.ts` survives filtering: bar agrees with tsc/aft_inspect.
+    assert_eq!(
+        counts.errors, 1,
+        "status bar must filter build-excluded .test.ts and .tsx (raw would be 3)"
+    );
+    assert_eq!(
+        counts.warnings, 1,
+        "only the in-build file's warning survives (raw would be 3)"
+    );
+}
+
+#[test]
+fn status_bar_counts_invalidate_on_tsconfig_clear() {
+    let (_temp_dir, root) = fixture_project();
+    write_file(
+        &root,
+        "pkg/tsconfig.json",
+        r#"{
+          "include": ["src/**/*.ts"],
+          "exclude": ["src/**/*.test.ts"]
+        }"#,
+    );
+    let excluded_test = write_file(
+        &root,
+        "pkg/src/app.test.ts",
+        "import { test } from 'bun:test';\ntest('x', () => import.meta.dir);\n",
+    );
+    let ctx = configured_context(&root);
+    configure_fake_typescript_lsp(&ctx);
+    open_with_lsp(&ctx, &excluded_test, "export const t = 1;\n");
+    ctx.update_status_bar_tier2(Some(0), Some(0), Some(0), Some(0), false);
+
+    // Excluded file is filtered out -> 0 errors.
+    assert_eq!(ctx.status_bar_counts().expect("surfaces").errors, 0);
+
+    // Clearing the membership cache (as the watcher does on a tsconfig change)
+    // must not change the verdict: a re-resolved cache reaches the same
+    // build-membership decision from disk, proving invalidation re-reads
+    // correctly rather than losing the filter.
+    ctx.clear_tsconfig_membership_cache();
+    assert_eq!(
+        ctx.status_bar_counts().expect("surfaces").errors,
+        0,
+        "membership filter must survive cache invalidation (re-resolved from disk)"
+    );
+}

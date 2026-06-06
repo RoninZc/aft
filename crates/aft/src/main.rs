@@ -766,6 +766,25 @@ fn watcher_path_is_ignore_file(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// A `tsconfig.json` / `jsconfig.json` (including variant names like
+/// `tsconfig.base.json`). A change to any of these can shift TypeScript build
+/// membership (which files `tsc` checks), so the status-bar membership cache
+/// must be invalidated. Deliberately broad on the variant suffix and ignorant
+/// of `extends` graphs: the cache is cleared wholesale on a match, and base
+/// configs almost always follow the `tsconfig*.json` naming. Non-standard base
+/// names are covered on the next `tsconfig.json` change or `configure`.
+fn watcher_path_is_tsconfig(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| {
+            n == "tsconfig.json"
+                || n == "jsconfig.json"
+                || ((n.starts_with("tsconfig.") || n.starts_with("jsconfig."))
+                    && n.ends_with(".json"))
+        })
+        .unwrap_or(false)
+}
+
 fn watcher_path_is_source(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -1522,6 +1541,15 @@ fn drain_watcher_events(ctx: &AppContext) {
     // next background scan reconciles them — surface that in the status bar
     // immediately (the `~` marker) so the agent never reads them as live.
     if ctx.mark_status_bar_tier2_stale() {
+        status_changed = true;
+    }
+
+    // A tsconfig change can shift which files `tsc` checks, which is the policy
+    // the status-bar E/W count filters on. Clear the membership cache wholesale
+    // so the next bar count re-resolves from disk (handles new nested configs,
+    // edited `extends` parents, and deletions without per-key bookkeeping).
+    if changed.iter().any(|path| watcher_path_is_tsconfig(path)) {
+        ctx.clear_tsconfig_membership_cache();
         status_changed = true;
     }
 

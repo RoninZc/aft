@@ -563,6 +563,13 @@ pub struct AppContext {
     /// the hot path (on `aft_inspect` reads and background Tier-2 completions).
     /// Errors/warnings are read live and not stored here.
     status_bar_tier2: RefCell<StatusBarTier2>,
+    /// Persistent TypeScript-project membership cache for the status-bar E/W
+    /// count. The bar reads E/W live on every tool result, so resolving the
+    /// nearest tsconfig (read + parse + glob-compile) per drain is too costly;
+    /// this memoizes per tsconfig dir. Invalidated wholesale on any
+    /// tsconfig-like watcher event and on `configure`. Owned here (not in
+    /// `DiagnosticsStore`, which stays raw policy-free) per the v0.35 council.
+    tsconfig_membership: RefCell<crate::lsp::tsconfig_membership::TsconfigMembershipCache>,
 }
 
 /// Result of requesting the persisted callgraph store for a store-backed op.
@@ -660,6 +667,9 @@ impl AppContext {
             bash_compress_flag: Arc::new(std::sync::atomic::AtomicBool::new(bash_compress_enabled)),
             gitignore: RefCell::new(None),
             status_bar_tier2: RefCell::new(StatusBarTier2::default()),
+            tsconfig_membership: RefCell::new(
+                crate::lsp::tsconfig_membership::TsconfigMembershipCache::new(),
+            ),
         }
     }
 
@@ -678,7 +688,7 @@ impl AppContext {
         else {
             return None;
         };
-        let (errors, warnings) = self.lsp_manager.borrow().warm_error_warning_counts();
+        let (errors, warnings) = self.status_bar_error_warning_counts();
         Some(StatusBarCounts {
             errors,
             warnings,
@@ -688,6 +698,32 @@ impl AppContext {
             todos: tier2.todos.unwrap_or(0),
             tier2_stale: tier2.stale,
         })
+    }
+
+    /// Error/warning counts for the agent status bar, filtered to match
+    /// `aft_inspect`/`tsc` (v0.35 council): only diagnostics under the canonical
+    /// project root, with build-excluded TS/JS files skipped via the persistent
+    /// tsconfig-membership cache, and cross-server duplicates collapsed. Falls
+    /// back to the raw warm count before configure has set a canonical root.
+    fn status_bar_error_warning_counts(&self) -> (usize, usize) {
+        let Some(root) = self.canonical_cache_root_opt() else {
+            // Pre-configure: no project root to scope against. Raw count is the
+            // best available signal (and the bar is gated on Tier-2 anyway).
+            return self.lsp_manager.borrow().warm_error_warning_counts();
+        };
+        let mut membership = self.tsconfig_membership.borrow_mut();
+        self.lsp_manager
+            .borrow()
+            .filtered_error_warning_counts(|file| {
+                file.starts_with(&root) && !membership.should_skip_diagnostics(file)
+            })
+    }
+
+    /// Invalidate the status-bar tsconfig-membership cache. Called from the
+    /// watcher seam when a tsconfig-like file changes and from `configure`
+    /// when the project root changes, so the next bar count re-reads from disk.
+    pub fn clear_tsconfig_membership_cache(&self) {
+        self.tsconfig_membership.borrow_mut().clear();
     }
 
     /// Mark the status-bar Tier-2 counts stale (rendered with `~`) without

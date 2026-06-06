@@ -31,6 +31,16 @@ impl TsconfigMembershipCache {
         Self::default()
     }
 
+    /// Drop all memoized project resolutions. Called when a tsconfig-like file
+    /// changes (watcher) or on `configure`, so the next membership query
+    /// re-reads from disk. A wholesale clear is intentional: nearest-tsconfig
+    /// resolution and `extends` chains make per-key invalidation unsound (a new
+    /// nested tsconfig or an edited `extends` parent changes membership for
+    /// files keyed under a different directory).
+    pub(crate) fn clear(&mut self) {
+        self.projects.clear();
+    }
+
     pub(crate) fn should_skip_diagnostics(&mut self, file: &Path) -> bool {
         if !is_ts_js_file(file) {
             return false;
