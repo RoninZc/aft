@@ -2008,28 +2008,61 @@ fn remove_sqlite_sidecars(path: &Path) {
     let _ = std::fs::remove_file(PathBuf::from(format!("{path_text}-journal")));
 }
 
+/// Bound the cold-build's tree-sitter pass to half the cores (cap 8) instead of
+/// the global all-cores rayon pool. The store cold-build is the heaviest
+/// background pass (parse-dominated) and runs on a separate thread off the
+/// single-threaded request loop; left unbounded it monopolizes every core and
+/// starves the bridge so interactive tools time out (the same starvation the
+/// v0.35 embedder and the inspect Tier-2 pool already cap). 8MB worker stacks
+/// match the main thread, since the extract walks tree-sitter ASTs.
+fn build_pool_size() -> usize {
+    std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(1)
+        .div_ceil(2)
+        .clamp(1, 8)
+}
+
 fn build_extracts_parallel(project_root: &Path, files: &[PathBuf]) -> BuildExtractsResult {
-    let results: Vec<std::result::Result<FileExtract, ExtractFailure>> = files
-        .par_iter()
-        .map(|path| match build_file_extract(project_root, path) {
-            Ok(extract) => Ok(extract),
-            Err(error) => {
-                let abs_path =
-                    normalize_file_path(project_root, path).unwrap_or_else(|_| path.to_path_buf());
-                let rel_path = relative_path(project_root, &abs_path);
-                let freshness = cache_freshness::collect(&abs_path).ok();
-                log::debug!(
-                    "callgraph store: skipping {} during cold build: {}",
-                    abs_path.display(),
-                    error
-                );
-                Err(ExtractFailure {
-                    rel_path,
-                    freshness,
-                })
-            }
-        })
-        .collect();
+    let extract_one = |path: &PathBuf| match build_file_extract(project_root, path) {
+        Ok(extract) => Ok(extract),
+        Err(error) => {
+            let abs_path =
+                normalize_file_path(project_root, path).unwrap_or_else(|_| path.to_path_buf());
+            let rel_path = relative_path(project_root, &abs_path);
+            let freshness = cache_freshness::collect(&abs_path).ok();
+            log::debug!(
+                "callgraph store: skipping {} during cold build: {}",
+                abs_path.display(),
+                error
+            );
+            Err(ExtractFailure {
+                rel_path,
+                freshness,
+            })
+        }
+    };
+
+    let run = || -> Vec<std::result::Result<FileExtract, ExtractFailure>> {
+        files.par_iter().map(extract_one).collect()
+    };
+
+    // Run inside a dedicated bounded pool when one builds; fall back to the
+    // global pool only if the bounded pool can't be constructed.
+    let results = match rayon::ThreadPoolBuilder::new()
+        .num_threads(build_pool_size())
+        .thread_name(|index| format!("aft-callgraph-build-{index}"))
+        .stack_size(8 * 1024 * 1024)
+        .build()
+    {
+        Ok(pool) => pool.install(run),
+        Err(error) => {
+            log::warn!(
+                "callgraph store: bounded build pool unavailable ({error}); using global pool"
+            );
+            run()
+        }
+    };
 
     let mut extracts = Vec::new();
     let mut failures = Vec::new();
@@ -5671,6 +5704,26 @@ fn unix_seconds_now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+#[cfg(test)]
+mod build_pool_tests {
+    use super::build_pool_size;
+
+    #[test]
+    fn build_pool_is_bounded_to_half_cores_capped_at_eight() {
+        let size = build_pool_size();
+        // Never zero, never the full core count, never above the 8 cap — this is
+        // the starvation guard for the cold-build's all-cores tree-sitter pass.
+        assert!(size >= 1, "pool size must be at least 1");
+        assert!(size <= 8, "pool size must be capped at 8, got {size}");
+
+        let cores = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1);
+        let expected = cores.div_ceil(2).clamp(1, 8);
+        assert_eq!(size, expected, "pool size must be div_ceil(2).clamp(1,8)");
+    }
 }
 
 #[cfg(test)]
