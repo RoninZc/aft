@@ -22,7 +22,19 @@ export function maybeStripCompressorPipe(
 ): PipeStripResult {
   if (!compressionEnabled) return { command, stripped: false };
 
-  const stages = splitTopLevelPipeline(command);
+  // Peel a leading `cmd && ... &&` prefix (e.g. `cd dir && bun test | grep`).
+  // Since `&&` binds looser than `|`, `A && B | C` means `A && (B | C)`, so the
+  // pipeline to strip is the LAST `&&`-segment and the earlier segments are a
+  // verbatim prefix to reattach. Bail on top-level `||`/`;` (ambiguous/risky).
+  const chain = splitTopLevelAndChain(command);
+  if (chain === null) return { command, stripped: false };
+  const prefix = chain
+    .slice(0, -1)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  const pipeline = chain[chain.length - 1] ?? "";
+
+  const stages = splitTopLevelPipeline(pipeline);
   if (stages.length < 2) return { command, stripped: false };
 
   const firstStage = stages[0]?.trim() ?? "";
@@ -34,11 +46,59 @@ export function maybeStripCompressorPipe(
   }
 
   const filters = filterStages.join(" | ");
+  const rebuilt = [...prefix, firstStage].join(" && ");
   return {
-    command: firstStage,
+    command: rebuilt,
     stripped: true,
     note: `[AFT removed \`| ${filters}\`; the output compressor already keeps failures + summary. Pass compressed:false to keep your pipe.]`,
   };
+}
+
+/**
+ * Split a command into its top-level `&&`-joined segments, respecting quotes
+ * and escapes. Returns `null` if the command contains a top-level `||` or `;`,
+ * which make prefix-peeling ambiguous, so the caller bails. Single `&`
+ * (redirects like `2>&1`, background) is left intact inside a segment.
+ */
+function splitTopLevelAndChain(command: string): string[] | null {
+  const segments: string[] = [];
+  let start = 0;
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+
+  for (let index = 0; index < command.length; index++) {
+    const char = command[index];
+    const next = command[index + 1];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+
+    if (char === "&" && next === "&") {
+      segments.push(command.slice(start, index));
+      start = index + 2;
+      index++;
+      continue;
+    }
+    if (char === "|" && next === "|") return null;
+    if (char === ";") return null;
+  }
+
+  segments.push(command.slice(start));
+  return segments;
 }
 
 function splitTopLevelPipeline(command: string): string[] {

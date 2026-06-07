@@ -53,12 +53,39 @@ describe("maybeStripCompressorPipe", () => {
     });
   });
 
-  test("strips known runner forms and rejects cd prefix", () => {
+  test("strips known runner forms", () => {
     expect(maybeStripCompressorPipe("npm run test:unit | tail -20", true).command).toBe(
       "npm run test:unit",
     );
     expect(maybeStripCompressorPipe("npx eslint src | head", true).command).toBe("npx eslint src");
-    expect(maybeStripCompressorPipe("cd packages/a && bun test | grep fail", true).stripped).toBe(
+  });
+
+  test("peels a leading cd && prefix and strips the pipeline (#102 dogfood)", () => {
+    // `cd dir && bun test | grep fail` is `cd dir && (bun test | grep fail)`
+    // because `&&` binds looser than `|`. The prefix is reattached verbatim.
+    const result = maybeStripCompressorPipe("cd packages/a && bun test | grep fail", true);
+    expect(result.stripped).toBe(true);
+    expect(result.command).toBe("cd packages/a && bun test");
+    expect(result.note).toContain("| grep fail");
+  });
+
+  test("peels a multi-segment && prefix", () => {
+    const result = maybeStripCompressorPipe(
+      "cd packages/a && export CI=1 && cargo test | grep -A2 FAILED",
+      true,
+    );
+    expect(result.stripped).toBe(true);
+    expect(result.command).toBe("cd packages/a && export CI=1 && cargo test");
+    expect(result.note).toContain("| grep -A2 FAILED");
+  });
+
+  test("does not strip when the &&-prefixed command is not a runner", () => {
+    expect(maybeStripCompressorPipe("cd packages/a && ls | grep foo", true).stripped).toBe(false);
+  });
+
+  test("bails on top-level semicolon or || in the chain", () => {
+    expect(maybeStripCompressorPipe("cd a; bun test | grep fail", true).stripped).toBe(false);
+    expect(maybeStripCompressorPipe("cd a || exit && bun test | grep fail", true).stripped).toBe(
       false,
     );
   });
