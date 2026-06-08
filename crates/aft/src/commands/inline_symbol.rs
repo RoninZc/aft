@@ -377,6 +377,21 @@ pub fn handle_inline_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
             }
         };
 
+    // Honesty: write_format_validate reverts the file when the inline produced
+    // invalid syntax (e.g. inlining into expression context, or losing let/var).
+    // The file is unchanged, so don't return a success response. Fail with the
+    // validation errors so the agent retries.
+    if write_result.rolled_back {
+        return Response::error(
+            &req.id,
+            "generated_invalid_syntax",
+            format!(
+                "inline_symbol produced invalid syntax; the file was left unchanged. {}",
+                edit::format_validation_errors(&write_result.validation_errors)
+            ),
+        );
+    }
+
     if let Ok(final_content) = std::fs::read_to_string(&path) {
         write_result.lsp_outcome = ctx.lsp_post_write(&path, &final_content, &req.params);
     }

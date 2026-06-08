@@ -301,6 +301,16 @@ pub struct WriteResult {
     pub lsp_outcome: Option<crate::lsp::manager::PostEditWaitOutcome>,
 }
 
+/// Render structured validation errors as a compact `line N: message` list for
+/// an error message. Used by the refactor handlers when a write was rolled back.
+pub fn format_validation_errors(errors: &[format::ValidationError]) -> String {
+    errors
+        .iter()
+        .map(|e| format!("line {}: {}", e.line, e.message))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 impl WriteResult {
     /// Append LSP diagnostics + per-server status to a response JSON
     /// object.

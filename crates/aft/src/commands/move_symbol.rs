@@ -482,6 +482,24 @@ pub fn handle_move_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
 
     // 1. Write source file (symbol removed)
     match edit::write_format_validate(&source_path, &new_source, &ctx.config(), &req.params) {
+        // A rolled-back write means the result was invalid syntax and the file
+        // was reverted (symbol NOT removed). Continuing would add the symbol to
+        // the destination too, leaving it defined in BOTH files. Treat it like a
+        // write failure: restore and bail.
+        Ok(wr) if wr.rolled_back => {
+            if restore_checkpoint(ctx, req.session(), &checkpoint_name) {
+                ctx.backup()
+                    .borrow_mut()
+                    .discard_operation_entries(req.session(), &op_id);
+            }
+            return move_error(
+                &req.id,
+                file,
+                &written_files,
+                &new_files,
+                "removing the symbol from the source produced invalid syntax; the move was rolled back and nothing changed",
+            );
+        }
         Ok(wr) => {
             if let Ok(final_content) = std::fs::read_to_string(source_path) {
                 ctx.lsp_notify_file_changed(source_path, &final_content);
@@ -512,6 +530,31 @@ pub fn handle_move_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
 
     // 2. Write destination file (symbol added)
     match edit::write_format_validate(&dest_path, &new_dest, &ctx.config(), &req.params) {
+        // CRITICAL: the source already had the symbol removed. If the
+        // destination write is rolled back (invalid syntax — e.g. moving
+        // TS-only syntax into a .js file), the symbol would be defined NOWHERE —
+        // silent data loss with success:true. Restore everything and fail, same
+        // as the Err branch below.
+        Ok(wr) if wr.rolled_back => {
+            let mut files_to_delete = new_files.clone();
+            if !dest_existed {
+                files_to_delete.push(dest_path.to_path_buf());
+            }
+            let restored = restore_checkpoint(ctx, req.session(), &checkpoint_name);
+            cleanup_new_files(&files_to_delete);
+            if restored {
+                ctx.backup()
+                    .borrow_mut()
+                    .discard_operation_entries(req.session(), &op_id);
+            }
+            return move_error(
+                &req.id,
+                destination,
+                &written_files,
+                &new_files,
+                "adding the symbol to the destination produced invalid syntax; the move was rolled back and nothing changed",
+            );
+        }
         Ok(wr) => {
             if let Ok(final_content) = std::fs::read_to_string(dest_path) {
                 ctx.lsp_notify_file_changed(dest_path, &final_content);
@@ -554,6 +597,25 @@ pub fn handle_move_symbol(req: &RawRequest, ctx: &AppContext) -> Response {
     let mut consumers_updated = usize::from(source_rewritten_as_consumer);
     for (path, _original, new_content) in &consumer_rewrites {
         match edit::write_format_validate(&path, new_content, &ctx.config(), &req.params) {
+            // A rolled-back consumer rewrite leaves the move half-applied (this
+            // consumer still imports from the old location while others were
+            // updated). Restore everything and fail, same as the Err branch.
+            Ok(wr) if wr.rolled_back => {
+                let restored = restore_checkpoint(ctx, req.session(), &checkpoint_name);
+                cleanup_new_files(&new_files);
+                if restored {
+                    ctx.backup()
+                        .borrow_mut()
+                        .discard_operation_entries(req.session(), &op_id);
+                }
+                return move_error(
+                    &req.id,
+                    &path.display().to_string(),
+                    &written_files,
+                    &new_files,
+                    "rewriting a consumer's import produced invalid syntax; the move was rolled back and nothing changed",
+                );
+            }
             Ok(wr) => {
                 if let Ok(final_content) = std::fs::read_to_string(&path) {
                     ctx.lsp_notify_file_changed(path, &final_content);

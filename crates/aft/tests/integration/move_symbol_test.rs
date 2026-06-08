@@ -185,6 +185,53 @@ fn move_symbol_skips_build_artifacts_and_gitignored_files() {
     aft.shutdown();
 }
 
+/// BLOCKER regression (R3-C): when the DESTINATION write is rolled back for
+/// invalid syntax, the symbol must NOT vanish. The source has the symbol removed
+/// first; if the dest write (which adds it) silently rolls back and the move
+/// still reports success, the symbol is defined nowhere. Trigger: move a symbol
+/// whose body carries TS type syntax into a `.js` file, where syntax validation
+/// rejects it. The move must FAIL and the source must still define the symbol.
+#[test]
+fn move_symbol_rolled_back_dest_does_not_lose_symbol() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let root = tmp.path().display().to_string();
+    let src = tmp.path().join("src.ts");
+    let dest = tmp.path().join("dest.js");
+
+    // TS source with a symbol whose body uses a type annotation (valid in .ts).
+    let src_original = "export function Foo(x: number): number { return x + 1; }\n";
+    write_file(&src, src_original);
+    write_file(&dest, "export const existing = 1;\n");
+
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, &root);
+    let resp = aft.send(&format!(
+        r#"{{"id":"rollback-dest","command":"move_symbol","file":{},"symbol":"Foo","destination":{}}}"#,
+        crate::helpers::json_string(&src.display()),
+        crate::helpers::json_string(&dest.display())
+    ));
+
+    // The move must fail (dest write would be invalid .js), not silently succeed.
+    assert_eq!(
+        resp["success"], false,
+        "move into a .js dest that rejects TS type syntax must fail, not lose the symbol: {resp:?}"
+    );
+
+    // CRITICAL: the source must still define Foo — nothing was lost.
+    let src_after = std::fs::read_to_string(&src).expect("read source");
+    assert!(
+        src_after.contains("function Foo"),
+        "source must still define Foo after a rolled-back move:\n{src_after}"
+    );
+    // The destination must not have been left with a broken partial write.
+    let dest_after = std::fs::read_to_string(&dest).expect("read dest");
+    assert!(
+        !dest_after.contains("function Foo"),
+        "dest must not contain a half-written Foo:\n{dest_after}"
+    );
+    aft.shutdown();
+}
+
 /// A tracked consumer inside a HIDDEN directory (e.g. `.storybook/`) must still
 /// be rewritten — `.hidden(false)` in the consumer walk. Skipping it (as the
 /// shared `walk_project_files` would, with `.hidden(true)`) leaves a dangling
