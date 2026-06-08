@@ -123,6 +123,68 @@ fn move_symbol_rewrites_barrel_named_reexport() {
     aft.shutdown();
 }
 
+/// Regression: move_symbol must not scan or rewrite imports inside build
+/// artifacts. The consumer collector now uses the shared project walker, which
+/// skips standard build/cache dirs (dist/build/target/...) and respects
+/// .gitignore/.aftignore. A compiled `dist/` copy that imports from the source
+/// must be left untouched while the real `src/` consumer is rewritten.
+#[test]
+fn move_symbol_skips_build_artifacts_and_gitignored_files() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let root = tmp.path().display().to_string();
+    let foo = tmp.path().join("src/foo.ts");
+    let bar = tmp.path().join("src/bar.ts");
+    let consumer = tmp.path().join("src/consumer.ts");
+    // Build artifact under dist/ (always-excluded) importing the moved symbol.
+    let dist_artifact = tmp.path().join("dist/consumer.js");
+    // A gitignored generated file importing the moved symbol.
+    let gitignored = tmp.path().join("generated/out.ts");
+
+    write_file(&foo, "export function Foo() { return 1; }\n");
+    write_file(&bar, "export const Bar = 2;\n");
+    write_file(
+        &consumer,
+        "import { Foo } from './foo';\nexport const x = Foo();\n",
+    );
+    write_file(
+        &dist_artifact,
+        "import { Foo } from './foo';\nexport const y = Foo();\n",
+    );
+    write_file(
+        &gitignored,
+        "import { Foo } from './foo';\nexport const z = Foo();\n",
+    );
+    write_file(&tmp.path().join(".gitignore"), "generated/\n");
+
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, &root);
+    let resp = aft.send(&format!(
+        r#"{{"id":"skip-artifacts","command":"move_symbol","file":{},"symbol":"Foo","destination":{}}}"#,
+        crate::helpers::json_string(&foo.display()),
+        crate::helpers::json_string(&bar.display())
+    ));
+    assert_eq!(resp["success"], true, "move should succeed: {resp:?}");
+
+    // Real consumer rewritten to the new location.
+    let consumer_content = std::fs::read_to_string(&consumer).expect("read consumer");
+    assert!(
+        consumer_content.contains("from './bar'"),
+        "real consumer should be rewritten to ./bar:\n{consumer_content}"
+    );
+    // Build artifact and gitignored file must be byte-for-byte untouched.
+    assert_eq!(
+        std::fs::read_to_string(&dist_artifact).expect("read dist"),
+        "import { Foo } from './foo';\nexport const y = Foo();\n",
+        "dist/ build artifact must not be rewritten"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&gitignored).expect("read gitignored"),
+        "import { Foo } from './foo';\nexport const z = Foo();\n",
+        "gitignored file must not be rewritten"
+    );
+    aft.shutdown();
+}
+
 // ---------------------------------------------------------------------------
 // Success path tests
 // ---------------------------------------------------------------------------

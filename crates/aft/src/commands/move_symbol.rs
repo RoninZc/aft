@@ -904,25 +904,24 @@ fn append_symbol_to_dest(dest_content: &str, symbol_text: &str) -> String {
     }
 }
 
+/// Collect TS/JS/TSX files in the project to scan for references to the moved
+/// symbol. Uses the shared project walker so it respects `.gitignore` /
+/// `.aftignore` and skips standard build/cache/VCS directories (node_modules,
+/// target, dist, build, .venv, venv, .git, __pycache__, .tox). A manual walk
+/// here previously only skipped `node_modules`, which both scanned thousands of
+/// irrelevant files in hybrid Rust/JS workspaces (slow / timeout) and rewrote
+/// imports inside compiled artifacts under dist/build (corrupting build output).
 fn collect_ts_js_files(root: &Path, out: &mut Vec<PathBuf>, source_path: &Path, dest_path: &Path) {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if path.file_name().and_then(|n| n.to_str()) == Some("node_modules") {
-                continue;
-            }
-            collect_ts_js_files(&path, out, source_path, dest_path);
-        } else if matches!(
+    for path in crate::callgraph::walk_project_files(root) {
+        if !matches!(
             detect_language(&path),
             Some(LangId::TypeScript | LangId::Tsx | LangId::JavaScript)
         ) {
-            let canon = std::fs::canonicalize(&path).unwrap_or(path);
-            if canon != source_path && canon != dest_path {
-                out.push(canon);
-            }
+            continue;
+        }
+        let canon = std::fs::canonicalize(&path).unwrap_or(path);
+        if canon != source_path && canon != dest_path {
+            out.push(canon);
         }
     }
 }
