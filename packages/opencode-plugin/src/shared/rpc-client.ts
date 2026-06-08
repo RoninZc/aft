@@ -154,7 +154,7 @@ export class AftRpcClient {
         const alive: PortInfo[] = [];
         for (const info of infos) {
           throwIfAborted(signal);
-          if (await this.healthCheck(info.port, signal)) {
+          if (await this.healthCheck(info.port, info.pid, signal)) {
             this.clearPortFailure(info);
             alive.push(info);
           } else {
@@ -202,7 +202,15 @@ export class AftRpcClient {
           live.push({ ...info, source: "instance", path: filePath });
         }
         // Newest first: files with a started_at sort before those without.
-        live.sort((a, b) => (b.started_at ?? 0) - (a.started_at ?? 0));
+        // Break ties deterministically (equal/absent started_at) by pid then
+        // port so selection is stable across reads rather than depending on
+        // directory iteration order.
+        live.sort(
+          (a, b) =>
+            (b.started_at ?? 0) - (a.started_at ?? 0) ||
+            (b.pid ?? 0) - (a.pid ?? 0) ||
+            (b.port ?? 0) - (a.port ?? 0),
+        );
         for (const info of live) add(info);
       } catch {
         // ignore read errors
@@ -268,14 +276,34 @@ export class AftRpcClient {
     }
   }
 
-  private async healthCheck(port: number, signal?: AbortSignal): Promise<boolean> {
+  private async healthCheck(
+    port: number,
+    expectedPid: number | undefined,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
     try {
       const response = await this.fetchWithTimeout(
         `http://127.0.0.1:${port}/health`,
         { method: "GET" },
         signal,
       );
-      return response.ok;
+      if (!response.ok) return false;
+      // Identity check: the port file records the owning pid and `/health`
+      // echoes the live server's pid. If they disagree, the port was recycled
+      // by a *different* AFT server (or an unrelated localhost service that
+      // happens to answer /health), so this port file is stale — reject it so
+      // we don't POST this file's token to the wrong server. Only enforced when
+      // both sides expose a pid (older port files omit it).
+      if (expectedPid !== undefined) {
+        try {
+          const body = (await response.json()) as { pid?: unknown };
+          if (typeof body?.pid === "number" && body.pid !== expectedPid) return false;
+        } catch {
+          // Non-JSON / unexpected body: not a healthy AFT server we trust.
+          return false;
+        }
+      }
+      return true;
     } catch {
       throwIfAborted(signal);
       return false;
