@@ -2056,8 +2056,10 @@ fn parse_rs_use_declaration(source: &str, node: &Node) -> Option<ImportStatement
     let raw_text = source[node.byte_range()].to_string();
     let byte_range = node.byte_range();
 
-    // Check for `pub` visibility modifier
-    let mut has_pub = false;
+    // Capture the EXACT visibility modifier text (`pub`, `pub(crate)`,
+    // `pub(super)`, `pub(in path)`) so organize re-emits it faithfully instead
+    // of widening every restricted visibility to a bare `pub`.
+    let mut visibility: Option<String> = None;
     let mut use_path = String::new();
     let mut names = Vec::new();
 
@@ -2067,7 +2069,7 @@ fn parse_rs_use_declaration(source: &str, node: &Node) -> Option<ImportStatement
             let child = c.node();
             match child.kind() {
                 "visibility_modifier" => {
-                    has_pub = true;
+                    visibility = Some(source[child.byte_range()].to_string());
                 }
                 "scoped_identifier" | "identifier" | "use_as_clause" => {
                     // Full path like `std::collections::HashMap` or just `serde`
@@ -2096,21 +2098,16 @@ fn parse_rs_use_declaration(source: &str, node: &Node) -> Option<ImportStatement
     Some(ImportStatement {
         module_path: use_path,
         names: names.clone(),
-        default_import: if has_pub {
-            Some("pub".to_string())
-        } else {
-            None
-        },
+        // `default_import` carries the visibility text for the Rust engine
+        // (e.g. "pub", "pub(crate)"). organize re-emits it verbatim.
+        default_import: visibility.clone(),
         namespace_import: None,
         kind: ImportKind::Value,
         group,
         byte_range,
         raw_text,
         form: ImportForm::RustUse {
-            // Only bare `pub` is recognized by the current parser; richer
-            // visibilities (`pub(crate)`, …) collapse to the same flag today and
-            // will be parsed precisely when the Rust engine moves onto `form`.
-            visibility: has_pub.then(|| "pub".to_string()),
+            visibility,
             named: names,
         },
     })

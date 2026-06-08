@@ -426,6 +426,14 @@ fn scenarios() -> Vec<Scenario> {
             input: "pub use crate::a::Exported;\nuse crate::a::Internal;\n\nfn main() {}\n",
             ops: &[Op::Organize],
         },
+        // Restricted visibilities must NOT be widened to bare `pub` on organize,
+        // and must not merge across visibilities.
+        Scenario {
+            name: "rs_organize_restricted_visibility_preserved",
+            ext: "rs",
+            input: "pub(crate) use crate::a::CrateOnly;\npub(super) use crate::a::SuperOnly;\npub use crate::a::Public;\nuse crate::a::Private;\n\nfn main() {}\n",
+            ops: &[Op::Organize],
+        },
         Scenario {
             name: "rs_remove_use",
             ext: "rs",

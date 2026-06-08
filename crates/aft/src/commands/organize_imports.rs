@@ -820,14 +820,17 @@ fn organize_rust_group(imps: &[&ImportStatement]) -> (Vec<OrganizedImport>, usiz
         /// Leaf item(s) for merging (e.g. ["Path"])
         items: Vec<String>,
         kind: ImportKind,
-        is_pub: bool,
+        /// Exact visibility text (`pub`, `pub(crate)`, …) or None for private.
+        /// Part of the merge key so different visibilities don't merge, and
+        /// re-emitted verbatim so `pub(crate) use` isn't widened to `pub use`.
+        visibility: Option<String>,
     }
 
     let mut paths: Vec<UsePath> = Vec::new();
     let mut removed = 0;
 
     for imp in imps {
-        let is_pub = imp.default_import.as_deref() == Some("pub");
+        let visibility = imp.default_import.clone();
         let mp = &imp.module_path;
 
         // Check if this already has a use list (contains '{')
@@ -853,7 +856,7 @@ fn organize_rust_group(imps: &[&ImportStatement]) -> (Vec<OrganizedImport>, usiz
                     prefix: Some(prefix),
                     items,
                     kind: imp.kind,
-                    is_pub,
+                    visibility: visibility.clone(),
                 });
             } else {
                 paths.push(UsePath {
@@ -861,7 +864,7 @@ fn organize_rust_group(imps: &[&ImportStatement]) -> (Vec<OrganizedImport>, usiz
                     prefix: None,
                     items: vec![],
                     kind: imp.kind,
-                    is_pub,
+                    visibility: visibility.clone(),
                 });
             }
         } else if let Some(last_sep) = mp.rfind("::") {
@@ -873,7 +876,7 @@ fn organize_rust_group(imps: &[&ImportStatement]) -> (Vec<OrganizedImport>, usiz
                 prefix: Some(prefix),
                 items: vec![item],
                 kind: imp.kind,
-                is_pub,
+                visibility: visibility.clone(),
             });
         } else {
             // Single-segment like "serde" — no prefix to merge on
@@ -882,14 +885,15 @@ fn organize_rust_group(imps: &[&ImportStatement]) -> (Vec<OrganizedImport>, usiz
                 prefix: None,
                 items: vec![],
                 kind: imp.kind,
-                is_pub,
+                visibility: visibility.clone(),
             });
         }
     }
 
-    // Group by (prefix, kind, is_pub) for merging
-    // key: (prefix, kind_discriminant, is_pub)
-    let mut merge_groups: BMap<(String, u8, bool), Vec<String>> = BMap::new();
+    // Group by (prefix, kind, visibility) for merging. Visibility is part of the
+    // key so `pub(crate) use a::X` never merges with `pub use a::Y`, and it is
+    // re-emitted verbatim (was: widened to bare `pub`).
+    let mut merge_groups: BMap<(String, u8, Option<String>), Vec<String>> = BMap::new();
     let mut no_prefix: Vec<OrganizedImport> = Vec::new();
 
     for up in &paths {
@@ -899,7 +903,7 @@ fn organize_rust_group(imps: &[&ImportStatement]) -> (Vec<OrganizedImport>, usiz
                 ImportKind::Type => 1,
                 ImportKind::SideEffect => 2,
             };
-            let key = (prefix.clone(), kind_d, up.is_pub);
+            let key = (prefix.clone(), kind_d, up.visibility.clone());
             let entry = merge_groups.entry(key).or_default();
             for item in &up.items {
                 if !entry.contains(item) {
@@ -913,7 +917,7 @@ fn organize_rust_group(imps: &[&ImportStatement]) -> (Vec<OrganizedImport>, usiz
             let already = no_prefix.iter().any(|o| {
                 o.module_path == up.full_path
                     && o.kind == up.kind
-                    && (o.default_import.as_deref() == Some("pub")) == up.is_pub
+                    && o.default_import == up.visibility
             });
             if already {
                 removed += 1;
@@ -921,11 +925,7 @@ fn organize_rust_group(imps: &[&ImportStatement]) -> (Vec<OrganizedImport>, usiz
                 no_prefix.push(OrganizedImport {
                     module_path: up.full_path.clone(),
                     names: vec![],
-                    default_import: if up.is_pub {
-                        Some("pub".to_string())
-                    } else {
-                        None
-                    },
+                    default_import: up.visibility.clone(),
                     namespace_import: None,
                     kind: up.kind,
                     raw_override: None,
@@ -937,7 +937,7 @@ fn organize_rust_group(imps: &[&ImportStatement]) -> (Vec<OrganizedImport>, usiz
     // Convert merge groups into OrganizedImport entries
     let mut organized: Vec<OrganizedImport> = Vec::new();
 
-    for ((prefix, kind_d, is_pub), mut items) in merge_groups {
+    for ((prefix, kind_d, visibility), mut items) in merge_groups {
         items.sort();
         let kind = match kind_d {
             1 => ImportKind::Type,
@@ -956,11 +956,7 @@ fn organize_rust_group(imps: &[&ImportStatement]) -> (Vec<OrganizedImport>, usiz
         organized.push(OrganizedImport {
             module_path,
             names: vec![],
-            default_import: if is_pub {
-                Some("pub".to_string())
-            } else {
-                None
-            },
+            default_import: visibility,
             namespace_import: None,
             kind,
             raw_override: None,
@@ -1064,12 +1060,13 @@ fn generate_organized_line(imp: &OrganizedImport, lang: LangId) -> String {
     }
     match lang {
         LangId::Rust => {
-            let prefix = if imp.default_import.as_deref() == Some("pub") {
-                "pub "
-            } else {
-                ""
-            };
-            format!("{}use {};", prefix, imp.module_path)
+            // default_import carries the exact visibility text (`pub`,
+            // `pub(crate)`, `pub(super)`, …); emit it verbatim so restricted
+            // visibilities aren't widened to bare `pub`.
+            match imp.default_import.as_deref() {
+                Some(vis) if !vis.is_empty() => format!("{} use {};", vis, imp.module_path),
+                _ => format!("use {};", imp.module_path),
+            }
         }
         LangId::Go => {
             // Go organize: regenerate as standalone imports
