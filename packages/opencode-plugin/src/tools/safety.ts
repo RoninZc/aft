@@ -3,7 +3,7 @@ import { coerceStringArray } from "@cortexkit/aft-bridge";
 import type { ToolContext, ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import type { PluginContext } from "../types.js";
-import { callBridge, resolveProjectRoot } from "./_shared.js";
+import { callBridge, expandTilde, resolveProjectRoot } from "./_shared.js";
 import {
   askEditPermission,
   assertExternalDirectoryPermission,
@@ -127,8 +127,12 @@ export function safetyTools(ctx: PluginContext): Record<string, ToolDefinition> 
           if (Array.isArray(checkpointFiles)) {
             const projectRoot = await resolveProjectRoot(ctx, context);
             const uniqueParents = new Set<string>();
-            for (const file of checkpointFiles) {
-              if (typeof file !== "string") continue;
+            for (const rawFile of checkpointFiles) {
+              if (typeof rawFile !== "string") continue;
+              // Expand ~ so the permission check resolves the real target (and
+              // matches what Rust receives below); a relative path is left for
+              // path.resolve against the project root.
+              const file = expandTilde(rawFile);
               const abs = path.isAbsolute(file) ? file : path.resolve(projectRoot, file);
               const parent = path.dirname(abs);
               if (uniqueParents.has(parent)) continue;
@@ -167,7 +171,12 @@ export function safetyTools(ctx: PluginContext): Record<string, ToolDefinition> 
         };
         const params: Record<string, unknown> = {};
         if (args.name !== undefined) params.name = args.name;
-        const payloadFiles = coerceStringArray(args.files);
+        // Expand ~ on every path so Rust (which treats ~ literally) gets the real
+        // target instead of creating/looking up a literal `~` path. Relative
+        // paths are left for Rust to resolve against the project root.
+        const payloadFiles = coerceStringArray(args.files).map(expandTilde);
+        const filePathArg =
+          typeof args.filePath === "string" ? expandTilde(args.filePath) : undefined;
         if (op === "checkpoint") {
           // For checkpoint, Rust only knows `files`. If the agent passes
           // `filePath` (a reasonable mistake — the tool schema exposes both),
@@ -176,12 +185,12 @@ export function safetyTools(ctx: PluginContext): Record<string, ToolDefinition> 
           // set.
           if (payloadFiles.length > 0) {
             params.files = payloadFiles;
-          } else if (args.filePath !== undefined) {
-            params.files = [args.filePath];
+          } else if (filePathArg !== undefined) {
+            params.files = [filePathArg];
           }
         } else {
           // undo / history / restore / list all take `file` as-is.
-          if (args.filePath !== undefined) params.file = args.filePath;
+          if (filePathArg !== undefined) params.file = filePathArg;
           if (payloadFiles.length > 0) params.files = payloadFiles;
         }
         const response = await callBridge(ctx, context, commandMap[op], params);

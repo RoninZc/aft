@@ -1,7 +1,14 @@
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import type { PluginContext } from "../types.js";
-import { callBridge, isEmptyParam } from "./_shared.js";
+import { assertExternalDirectoryPermission, permissionDeniedResponse } from "./permissions.js";
+import {
+  callBridge,
+  expandTilde,
+  isEmptyParam,
+  resolvePathFromProjectRoot,
+  resolveProjectRoot,
+} from "./_shared.js";
 
 const z = tool.schema;
 
@@ -23,7 +30,23 @@ export function conflictTools(ctx: PluginContext): Record<string, ToolDefinition
       },
       execute: async (args, context): Promise<string> => {
         const params: Record<string, unknown> = {};
-        if (!isEmptyParam(args?.path)) params.path = args.path;
+        if (!isEmptyParam(args?.path)) {
+          // `path` points at a repo/worktree to inspect — gate it through the
+          // external-directory permission like the other path-taking tools, so
+          // inspecting a repo outside the project root still prompts. Resolve
+          // tilde/relative the same way Rust will before the check.
+          const expanded = expandTilde(String(args.path));
+          const projectRoot = await resolveProjectRoot(ctx, context);
+          const resolved = resolvePathFromProjectRoot(projectRoot, expanded);
+          const denied = await assertExternalDirectoryPermission(context, resolved, {
+            kind: "directory",
+          });
+          if (denied) return permissionDeniedResponse(denied);
+          // Send the SAME resolved path the permission check approved (closes the
+          // check-vs-use gap and gives Rust an absolute path it won't re-resolve
+          // against a possibly-different cwd).
+          params.path = resolved;
+        }
         const response = await callBridge(ctx, context, "git_conflicts", params);
         if (response.success === false) {
           throw new Error((response.message as string) || "git_conflicts failed");

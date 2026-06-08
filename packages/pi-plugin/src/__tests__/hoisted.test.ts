@@ -171,16 +171,17 @@ describe("hoisted tool adapters", () => {
 
     await executeTool(
       tools.get("grep")!,
-      { pattern: "console", path: "src", include: "*.ts,**/*.{tsx,jsx}", contextLines: 2 },
+      { pattern: "console", path: "src", include: "*.ts,**/*.{tsx,jsx}" },
       { cwd: root } as never,
     );
 
     expect(calls[0].command).toBe("grep");
+    // Rust grep does not consume context_lines, so Pi no longer advertises or
+    // forwards it (parity with OpenCode grep, which never exposed it).
     expect(calls[0].params).toEqual({
       pattern: "console",
       path: join(root, "src"),
       include: ["*.ts", "**/*.{tsx,jsx}"],
-      context_lines: 2,
     });
   });
 

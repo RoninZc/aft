@@ -193,7 +193,6 @@ const GrepParams = Type.Object({
     Type.String({ description: "Glob filter for included files (e.g. '*.ts,*.tsx')" }),
   ),
   caseSensitive: Type.Optional(Type.Boolean({ description: "Case-sensitive matching" })),
-  contextLines: optionalInt(1, Number.MAX_SAFE_INTEGER),
 });
 
 export interface ToolSurfaceFlags {
@@ -280,7 +279,10 @@ export function registerHoistedTools(
         const bridge = bridgeFor(ctx, extCtx.cwd);
         const offset = coerceOptionalInt(params.offset, "offset", 1, Number.MAX_SAFE_INTEGER);
         const limit = coerceOptionalInt(params.limit, "limit", 1, Number.MAX_SAFE_INTEGER);
-        const req: Record<string, unknown> = { file: params.path };
+        // Resolve ~ / relative so Rust gets a real path, not a literal `~/...`.
+        const req: Record<string, unknown> = {
+          file: await resolvePathArg(extCtx.cwd, params.path),
+        };
         if (offset !== undefined) {
           req.start_line = offset;
           if (limit !== undefined) {
@@ -328,7 +330,12 @@ export function registerHoistedTools(
         _onUpdate,
         extCtx,
       ) {
-        await assertExternalDirectoryPermission(extCtx, params.filePath, "modify", {
+        // Resolve ~ / relative ONCE and use the same value for the permission
+        // check and the bridge. Previously the check expanded ~ but the bridge
+        // got the raw `~/...`, which Rust treats literally — creating a literal
+        // `~` directory under the project root instead of writing to home.
+        const filePath = await resolvePathArg(extCtx.cwd, params.filePath);
+        await assertExternalDirectoryPermission(extCtx, filePath, "modify", {
           restrictToProjectRoot: surface.restrictToProjectRoot,
         });
         const bridge = bridgeFor(ctx, extCtx.cwd);
@@ -336,7 +343,7 @@ export function registerHoistedTools(
           bridge,
           "write",
           {
-            file: params.filePath,
+            file: filePath,
             content: params.content,
             diagnostics: params.diagnostics ?? diagnosticsOnEditDefault(ctx),
             include_diff_content: true,
@@ -375,7 +382,11 @@ export function registerHoistedTools(
         _onUpdate,
         extCtx,
       ) {
-        await assertExternalDirectoryPermission(extCtx, params.filePath, "modify", {
+        // Resolve ~ / relative ONCE (see the write handler) and use it for the
+        // permission check and the bridge, so Rust receives the real target
+        // instead of a literal `~/...`.
+        const filePath = await resolvePathArg(extCtx.cwd, params.filePath);
+        await assertExternalDirectoryPermission(extCtx, filePath, "modify", {
           restrictToProjectRoot: surface.restrictToProjectRoot,
         });
         const bridge = bridgeFor(ctx, extCtx.cwd);
@@ -387,7 +398,7 @@ export function registerHoistedTools(
         if (typeof params.appendContent === "string") {
           const req: Record<string, unknown> = {
             op: "append",
-            file: params.filePath,
+            file: filePath,
             append_content: params.appendContent,
             diagnostics: params.diagnostics ?? diagnosticsOnEditDefault(ctx),
             include_diff_content: true,
@@ -397,7 +408,7 @@ export function registerHoistedTools(
         }
 
         const req: Record<string, unknown> = {
-          file: params.filePath,
+          file: filePath,
           match: params.oldString ?? "",
           replacement: params.newString ?? "",
           diagnostics: params.diagnostics ?? diagnosticsOnEditDefault(ctx),
@@ -450,13 +461,6 @@ export function registerHoistedTools(
         }
         if (params.include) req.include = splitIncludeGlobs(params.include);
         if (params.caseSensitive !== undefined) req.case_sensitive = params.caseSensitive;
-        const contextLines = coerceOptionalInt(
-          params.contextLines,
-          "contextLines",
-          1,
-          Number.MAX_SAFE_INTEGER,
-        );
-        if (contextLines !== undefined) req.context_lines = contextLines;
 
         const response = await callBridge(bridge, "grep", req, extCtx);
         const text = (response.text as string | undefined) ?? "";

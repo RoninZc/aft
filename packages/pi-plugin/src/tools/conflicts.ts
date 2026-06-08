@@ -6,6 +6,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { PluginContext } from "../types.js";
 import { bridgeFor, callBridge, textResult } from "./_shared.js";
+import { assertExternalDirectoryPermission, resolvePathArg } from "./hoisted.js";
 import {
   collectTextContent,
   type RenderContextLike,
@@ -82,7 +83,15 @@ export function registerConflictsTool(pi: ExtensionAPI, ctx: PluginContext): voi
       const bridge = bridgeFor(ctx, extCtx.cwd);
       const reqParams: Record<string, unknown> = {};
       const path = (params as { path?: unknown })?.path;
-      if (typeof path === "string" && path.trim() !== "") reqParams.path = path;
+      if (typeof path === "string" && path.trim() !== "") {
+        // Gate the repo/worktree path like Pi's other path-taking tools (only
+        // prompts when restrict_to_project_root is true), and resolve tilde/
+        // relative the same way Rust will.
+        await assertExternalDirectoryPermission(extCtx, path, "inspect", {
+          restrictToProjectRoot: ctx.config.restrict_to_project_root ?? false,
+        });
+        reqParams.path = await resolvePathArg(extCtx.cwd, path);
+      }
       const response = await callBridge(bridge, "git_conflicts", reqParams, extCtx);
       return textResult((response.text as string | undefined) ?? JSON.stringify(response, null, 2));
     },
