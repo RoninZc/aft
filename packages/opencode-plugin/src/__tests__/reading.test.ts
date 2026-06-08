@@ -11,7 +11,7 @@ import type { BridgePool } from "@cortexkit/aft-bridge";
 import type { ToolContext } from "@opencode-ai/plugin";
 import { readingTools } from "../tools/reading.js";
 import type { PluginContext } from "../types.js";
-import { noopAsk } from "./test-helpers";
+import { noopAsk, toolResultText } from "./test-helpers";
 
 type BridgeResponse = Record<string, unknown>;
 type SendCall = { command: string; params: Record<string, unknown> };
@@ -192,15 +192,17 @@ describe("reading tool adapters", () => {
       };
     });
 
-    const result = (await tools.aft_zoom.execute(
-      {
-        targets: [
-          { filePath: "src/a.ts", symbol: "foo" },
-          { filePath: "src/b.ts", symbol: "bar" },
-        ],
-      },
-      createMockSdkContext(root),
-    )) as string;
+    const result = toolResultText(
+      await tools.aft_zoom.execute(
+        {
+          targets: [
+            { filePath: "src/a.ts", symbol: "foo" },
+            { filePath: "src/b.ts", symbol: "bar" },
+          ],
+        },
+        createMockSdkContext(root),
+      ),
+    );
 
     expect(sendCalls).toHaveLength(2);
     expect(sendCalls[0]?.command).toBe("zoom");
@@ -231,15 +233,17 @@ describe("reading tool adapters", () => {
       };
     });
 
-    const text = (await tools.aft_zoom.execute(
-      {
-        targets: [
-          { filePath: "src/a.ts", symbol: "ok" },
-          { filePath: "src/b.ts", symbol: "missing" },
-        ],
-      },
-      createMockSdkContext(root),
-    )) as string;
+    const text = toolResultText(
+      await tools.aft_zoom.execute(
+        {
+          targets: [
+            { filePath: "src/a.ts", symbol: "ok" },
+            { filePath: "src/b.ts", symbol: "missing" },
+          ],
+        },
+        createMockSdkContext(root),
+      ),
+    );
 
     expect(text).toContain("Incomplete zoom results");
     expect(text).toContain('Symbol "missing" not found in src/b.ts:');

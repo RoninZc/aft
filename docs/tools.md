@@ -35,7 +35,7 @@ them either way when the surface tier includes them.)
 |------|-------------|------------|
 | `read` | File read, directory listing, image/PDF detection | `filePath`, `startLine`, `endLine`, `offset`, `limit` |
 | `write` | Write file with auto-dirs, backup, format, inline diagnostics | `filePath`, `content` |
-| `edit` | Find/replace, symbol replace, batch, transaction, glob | `filePath`, `oldString`, `newString`, `symbol`, `content`, `edits[]` |
+| `edit` | Find/replace, symbol replace, batch, glob | `filePath`, `oldString`, `newString`, `symbol`, `content`, `edits[]` |
 | `apply_patch` | `*** Begin Patch` multi-file patch format | `patchText` |
 | `ast_grep_search` | AST pattern search with meta-variables | `pattern`, `lang`, `paths[]`, `globs[]` |
 | `ast_grep_replace` | AST pattern replace (applies by default) | `pattern`, `rewrite`, `lang`, `dryRun` |
@@ -157,16 +157,7 @@ Includes decorators, doc comments, and attributes in the replacement range.
 
 Set `content` to `""` to delete lines. Per-edit `occurrence` is supported.
 
-**Multi-file transaction** — pass `operations` array. Rolls back all files if any operation fails.
-
-```json
-{
-  "operations": [
-    { "file": "a.ts", "command": "write", "content": "..." },
-    { "file": "b.ts", "command": "edit_match", "match": "x", "replacement": "y" }
-  ]
-}
-```
+To edit multiple files, make parallel `edit` calls in one response.
 
 **Glob replace** — use a glob as `filePath` with `replaceAll: true`:
 

@@ -11,7 +11,7 @@ import { createBashStatusTool, createBashTool } from "../tools/bash.js";
 import { createBashWatchTool } from "../tools/bash_watch.js";
 import { createBashWriteTool } from "../tools/bash_write.js";
 import type { PluginContext } from "../types.js";
-import { noopAsk } from "./test-helpers";
+import { noopAsk, toolResultText } from "./test-helpers";
 
 const tempDirs: string[] = [];
 
@@ -77,7 +77,7 @@ describe("OpenCode bash PTY layer", () => {
     const bash = createBashTool(pluginCtx);
     // Caller omits background: true — plugin must auto-promote because pty:true
     // requires the polling background lifecycle.
-    const output = await bash.execute({ command: "python", pty: true }, runtime());
+    const output = toolResultText(await bash.execute({ command: "python", pty: true }, runtime()));
     expect(output).toContain("bash-pty-implied-bg");
     // Rust spawn payload sees background:true and pty:true.
     const lastCall = calls.at(-1);

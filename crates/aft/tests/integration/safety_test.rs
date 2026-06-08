@@ -237,36 +237,6 @@ fn undo_after_append_created_file_deletes_it() {
     assert!(status.success());
 }
 
-#[test]
-fn undo_after_transaction_created_file_deletes_it() {
-    let dir = temp_dir("undo_transaction_created_file");
-    let file = dir.join("created-by-transaction.txt");
-    let mut aft = AftProcess::spawn();
-
-    let tx = serde_json::json!({
-        "id": "transaction-created",
-        "command": "transaction",
-        "operations": [{
-            "command": "write",
-            "file": file.display().to_string(),
-            "content": "created in tx\n",
-        }],
-    });
-    let tx_resp = aft.send(&serde_json::to_string(&tx).unwrap());
-    assert_eq!(tx_resp["success"], true, "transaction: {tx_resp:?}");
-    assert_eq!(fs::read_to_string(&file).unwrap(), "created in tx\n");
-
-    let undo = aft.send(r#"{"id":"undo-transaction-created","command":"undo"}"#);
-    assert_eq!(undo["success"], true, "undo: {undo:?}");
-    assert!(
-        !file.exists(),
-        "transaction-created file should be removed by undo"
-    );
-
-    let status = aft.shutdown();
-    assert!(status.success());
-}
-
 #[cfg(unix)]
 #[test]
 fn symlink_file_delete_is_rejected_without_project_restriction() {

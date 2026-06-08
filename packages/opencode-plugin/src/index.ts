@@ -36,7 +36,6 @@ import {
 } from "./lsp-github-install.js";
 import { GITHUB_LSP_TABLE } from "./lsp-github-table.js";
 import { NPM_LSP_TABLE } from "./lsp-npm-table.js";
-import { consumeToolMetadata } from "./metadata-store.js";
 import { normalizeToolMap } from "./normalize-schemas.js";
 import {
   cleanupWarnings,
@@ -1051,17 +1050,15 @@ async function initializePluginForDirectory(input: Parameters<Plugin>[0]) {
       await sendIgnoredMessage(input.client, commandInput.sessionID, formatStatusMarkdown(status));
       throwSentinel(commandInput.command);
     },
-    // Restore metadata that fromPlugin() overwrites (opencode bug workaround)
+    // Post-process tool output: append bash hints, drain in-turn background
+    // completions, and append the agent status bar. (UI title/diff metadata is
+    // now returned directly from each tool's execute() — OpenCode's fromPlugin
+    // preserves it — so the old metadata-store merge is gone; see #96.)
     "tool.execute.after": async (
       toolInput: { tool: string; sessionID: string; callID: string },
       output: { title: string; output: string; metadata: Record<string, unknown> } | undefined,
     ) => {
       if (!output) return;
-      const stored = consumeToolMetadata(toolInput.sessionID, toolInput.callID);
-      if (stored) {
-        if (stored.title) output.title = stored.title;
-        if (stored.metadata) output.metadata = { ...output.metadata, ...stored.metadata };
-      }
       // Bash output hints — see shared/bash-hints.ts. The grep/rg code-search
       // redirect is emitted by the Rust bash rewriter (it owns the rewrite and
       // now reads `aft_search_registered` from config), so the plugin only adds

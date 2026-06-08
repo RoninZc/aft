@@ -7,7 +7,7 @@ import { $ } from "bun";
 import { createBashStatusTool, createBashTool } from "../../tools/bash.js";
 import { createBashWriteTool } from "../../tools/bash_write.js";
 import type { PluginContext } from "../../types.js";
-import { noopAsk } from "../test-helpers";
+import { noopAsk, toolResultText } from "../test-helpers";
 import { cleanupHarnesses, createHarness, type E2EHarness, prepareBinary } from "./helpers.js";
 
 const initialBinary = await prepareBinary();
@@ -90,7 +90,7 @@ maybeDescribe("e2e bash PTY (OpenCode adapter + bridge + Rust)", () => {
 
   test.skipIf(!python)("Test 28: pty_e2e_python_repl", async () => {
     const { h, bash, status, write } = await pluginHarness();
-    const launched = String(
+    const launched = toolResultText(
       await bash.execute({ command: `${python} -q`, pty: true, background: true }, runtime(h)),
     );
     const taskId = launched.match(/bash-[a-zA-Z0-9_-]+/)?.[0];
@@ -110,7 +110,7 @@ maybeDescribe("e2e bash PTY (OpenCode adapter + bridge + Rust)", () => {
   test("Test 29: pty_e2e_ansi_screen_rendering", async () => {
     const { h, bash, status } = await pluginHarness();
     const command = `printf '\\033[2J\\033[Halpha\\033[10;5Hbeta'`;
-    const launched = String(
+    const launched = toolResultText(
       await bash.execute({ command, pty: true, background: true }, runtime(h)),
     );
     const taskId = launched.match(/bash-[a-zA-Z0-9_-]+/)?.[0];

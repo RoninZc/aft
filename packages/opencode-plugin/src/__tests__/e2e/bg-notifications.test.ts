@@ -175,7 +175,7 @@ async function spawnBackground(
   bash: ReturnType<typeof createBashTool>,
   command: string,
 ): Promise<string> {
-  const output = await bash.execute({ command, background: true }, {
+  const result = await bash.execute({ command, background: true }, {
     sessionID: "e2e-session",
     messageID: "e2e-message",
     agent: "e2e-agent",
@@ -186,6 +186,9 @@ async function spawnBackground(
     ask: noopAsk,
     callID: `call-${Date.now()}`,
   } as ToolContext);
+  // The bash tool returns `{ output, title, metadata }` (UI metadata on the
+  // result); the agent-visible text is `output`.
+  const output = typeof result === "string" ? result : (result?.output ?? "");
   // Spawn-line format: "Background task started: <taskId>. <anti-poll reminder>."
   // Match the taskId between the colon and the trailing period so the test
   // works regardless of any anti-poll text we append. taskId charset is

@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import type { BridgePool } from "@cortexkit/aft-bridge";
 import type { ToolContext } from "@opencode-ai/plugin";
-import { consumeToolMetadata } from "../metadata-store.js";
 import { aftPrefixedTools, hoistedTools } from "../tools/hoisted.js";
 import type { PluginContext } from "../types.js";
 import { noopAsk } from "./test-helpers";
@@ -16,6 +15,16 @@ let sdkCtx = createMockSdkContext(PROJECT_CWD);
 let tmpDir: string | null = null;
 const failingTest = ((test as typeof test & { failing?: typeof test }).failing ??
   test) as typeof test;
+
+/**
+ * read/write/edit/apply_patch now return `{ output, title, metadata }` so UI
+ * metadata (title + diff) rides on the result instead of a side-channel store.
+ * Most assertions only care about the agent-visible text — unwrap it here
+ * (tolerating the legacy bare-string shape).
+ */
+function text(r: unknown): string {
+  return typeof r === "string" ? r : ((r as { output?: string })?.output ?? "");
+}
 
 async function makeTempDir(): Promise<string> {
   return await realpath(await mkdtemp(resolve(tmpdir(), "aft-hoisted-")));
@@ -126,9 +135,8 @@ describe("Hoisted tool execute handlers", () => {
 
     const { calls, tools } = createMockHoistedHarness(async () => ({ success: true }));
 
-    const result = await tools.write.execute(
-      { filePath: "src/app.ts", content: "export {};\n" },
-      sdkCtx,
+    const result = text(
+      await tools.write.execute({ filePath: "src/app.ts", content: "export {};\n" }, sdkCtx),
     );
 
     expect(result).toBe("File updated.");
@@ -175,9 +183,11 @@ describe("Hoisted tool execute handlers", () => {
       lsp_diagnostics: [{ severity: "error", line: 7, message: "Bad type" }],
     }));
 
-    const result = await tools.write.execute(
-      { filePath: "src/app.ts", content: "export {};\n", diagnostics: true },
-      sdkCtx,
+    const result = text(
+      await tools.write.execute(
+        { filePath: "src/app.ts", content: "export {};\n", diagnostics: true },
+        sdkCtx,
+      ),
     );
 
     expect(calls[0].params.diagnostics).toBe(true);
@@ -194,9 +204,11 @@ describe("Hoisted tool execute handlers", () => {
       replacements: 1,
     }));
 
-    const result = await tools.edit.execute(
-      { filePath: "src/app.ts", oldString: "before", newString: "after" },
-      sdkCtx,
+    const result = text(
+      await tools.edit.execute(
+        { filePath: "src/app.ts", oldString: "before", newString: "after" },
+        sdkCtx,
+      ),
     );
 
     // Agent-facing result is the compact summary sentence, not raw JSON.
@@ -219,14 +231,16 @@ describe("Hoisted tool execute handlers", () => {
       lsp_diagnostics: diagnostics,
     }));
 
-    const result = await tools.edit.execute(
-      {
-        filePath: "src/app.ts",
-        oldString: "before",
-        newString: "after",
-        diagnostics: true,
-      },
-      sdkCtx,
+    const result = text(
+      await tools.edit.execute(
+        {
+          filePath: "src/app.ts",
+          oldString: "before",
+          newString: "after",
+          diagnostics: true,
+        },
+        sdkCtx,
+      ),
     );
 
     // Headline is the compact summary; LSP errors are appended below it.
@@ -255,7 +269,7 @@ describe("Hoisted tool execute handlers", () => {
       throw new Error(`Unexpected command: ${command}`);
     });
 
-    const result = await tools.apply_patch.execute({ patchText }, sdkCtx);
+    const result = text(await tools.apply_patch.execute({ patchText }, sdkCtx));
 
     const writeCall = calls.find((call) => call.command === "write");
     expect(writeCall?.params.diagnostics).toBe(false);
@@ -289,7 +303,7 @@ describe("Hoisted tool execute handlers", () => {
       throw new Error(`Unexpected command: ${command}`);
     });
 
-    const result = await tools.apply_patch.execute({ patchText, diagnostics: true }, sdkCtx);
+    const result = text(await tools.apply_patch.execute({ patchText, diagnostics: true }, sdkCtx));
 
     const writeCall = calls.find((call) => call.command === "write");
     expect(writeCall?.params.diagnostics).toBe(true);
@@ -483,15 +497,17 @@ describe("Hoisted tool execute handlers", () => {
       edits_applied: 2,
     }));
 
-    const result = await tools.edit.execute(
-      {
-        filePath: "batch.ts",
-        edits: [
-          { oldString: "before", newString: "after" },
-          { startLine: 4, endLine: 6, content: "replacement" },
-        ],
-      },
-      sdkCtx,
+    const result = text(
+      await tools.edit.execute(
+        {
+          filePath: "batch.ts",
+          edits: [
+            { oldString: "before", newString: "after" },
+            { startLine: 4, endLine: 6, content: "replacement" },
+          ],
+        },
+        sdkCtx,
+      ),
     );
 
     // 2 edits applied, no diff in the mock -> counts default to 0.
@@ -510,25 +526,6 @@ describe("Hoisted tool execute handlers", () => {
         session_id: "test",
       },
     });
-  });
-
-  test("transaction edit throws the Rust error response", async () => {
-    tmpDir = await makeTempDir();
-    sdkCtx = createMockSdkContext(tmpDir);
-
-    const { tools } = createMockHoistedHarness(async (command) => {
-      expect(command).toBe("transaction");
-      return { success: false, message: "transaction rejected" };
-    });
-
-    await expect(
-      tools.edit.execute(
-        {
-          operations: [{ file: "a.ts", command: "write", content: "export const a = 1;\n" }],
-        },
-        sdkCtx,
-      ),
-    ).rejects.toThrow("transaction rejected");
   });
 
   test('legacy aft_edit mode:"write" throws the Rust error response', async () => {
@@ -563,14 +560,16 @@ describe("Hoisted tool execute handlers", () => {
       replacements: 3,
     }));
 
-    const result = await tools.edit.execute(
-      {
-        filePath: "repeated.ts",
-        oldString: "oldName",
-        newString: "newName",
-        replaceAll: true,
-      },
-      sdkCtx,
+    const result = text(
+      await tools.edit.execute(
+        {
+          filePath: "repeated.ts",
+          oldString: "oldName",
+          newString: "newName",
+          replaceAll: true,
+        },
+        sdkCtx,
+      ),
     );
 
     // replaceAll with 3 replacements -> count surfaced; no diff -> +0/-0.
@@ -606,9 +605,8 @@ describe("Hoisted tool execute handlers", () => {
       diff: { before: bigBefore, after: bigAfter, additions: 1, deletions: 1 },
     }));
 
-    const result = await tools.edit.execute(
-      { filePath: "big.ts", oldString: "x", newString: "y" },
-      sdkCtx,
+    const result = text(
+      await tools.edit.execute({ filePath: "big.ts", oldString: "x", newString: "y" }, sdkCtx),
     );
 
     // Agent result must NOT contain the 50KB file content from either side.
@@ -666,7 +664,7 @@ describe("Hoisted tool execute handlers", () => {
       throw new Error(`Unexpected command: ${command}`);
     });
 
-    const result = await tools.apply_patch.execute({ patchText }, sdkCtx);
+    const result = text(await tools.apply_patch.execute({ patchText }, sdkCtx));
 
     expect(result).toContain("Created created.ts");
     expect(result).toContain("Failed to create broken.ts: Simulated patch failure");
@@ -753,7 +751,7 @@ describe("Hoisted tool execute handlers", () => {
       throw new Error(`Unexpected command: ${command}`);
     });
 
-    const result = await tools.apply_patch.execute({ patchText }, sdkCtx);
+    const result = text(await tools.apply_patch.execute({ patchText }, sdkCtx));
 
     expect(destWritten).toBe(true);
     expect(existsSync(earlierFile)).toBe(true);
@@ -917,7 +915,7 @@ describe("Hoisted tool execute handlers", () => {
       throw new Error(`Unexpected command: ${command}`);
     });
 
-    const result = await tools.apply_patch.execute({ patchText }, sdkCtx);
+    const result = text(await tools.apply_patch.execute({ patchText }, sdkCtx));
 
     expect(result).toContain("Updated cli-program.ts");
     expect(result).toContain("Updated cli-installer.ts");
@@ -998,7 +996,7 @@ describe("Hoisted tool execute handlers", () => {
       message: "Binary file (512 bytes)",
     }));
 
-    const result = await tools.read.execute({ filePath: "artifact.bin" }, sdkCtx);
+    const result = text(await tools.read.execute({ filePath: "artifact.bin" }, sdkCtx));
 
     expect(result).toBe("Binary file (512 bytes)");
     expect(calls[0]).toEqual({
@@ -1031,8 +1029,8 @@ describe("Hoisted tool execute handlers", () => {
       };
     });
 
-    const directoryResult = await tools.read.execute({ filePath: "." }, sdkCtx);
-    const truncatedResult = await tools.read.execute({ filePath: "big.ts" }, sdkCtx);
+    const directoryResult = text(await tools.read.execute({ filePath: "." }, sdkCtx));
+    const truncatedResult = text(await tools.read.execute({ filePath: "big.ts" }, sdkCtx));
 
     expect(directoryResult).toBe("a.ts\nsrc/");
     // Case B: agent did NOT specify a range, response was clamped → hint footer
@@ -1056,7 +1054,7 @@ describe("Hoisted tool execute handlers", () => {
       total_lines: 3,
     }));
 
-    const result = await tools.read.execute({ filePath: "small.ts" }, sdkCtx);
+    const result = text(await tools.read.execute({ filePath: "small.ts" }, sdkCtx));
 
     expect(result).toBe("1: one\n2: two\n3: three");
   });
@@ -1081,9 +1079,8 @@ describe("Hoisted tool execute handlers", () => {
       total_lines: 191,
     }));
 
-    const result = await tools.read.execute(
-      { filePath: "registry.ts", startLine: 130, endLine: 190 },
-      sdkCtx,
+    const result = text(
+      await tools.read.execute({ filePath: "registry.ts", startLine: 130, endLine: 190 }, sdkCtx),
     );
 
     // The user's exact complaint: when end_line matches total_lines (or is
@@ -1113,9 +1110,8 @@ describe("Hoisted tool execute handlers", () => {
       total_lines: 200,
     }));
 
-    const result = await tools.read.execute(
-      { filePath: "mid.ts", startLine: 100, endLine: 150 },
-      sdkCtx,
+    const result = text(
+      await tools.read.execute({ filePath: "mid.ts", startLine: 100, endLine: 150 }, sdkCtx),
     );
 
     expect(result).toBe("100: ...\n150: ...");
@@ -1139,9 +1135,8 @@ describe("Hoisted tool execute handlers", () => {
       total_lines: 30,
     }));
 
-    const result = await tools.read.execute(
-      { filePath: "small.ts", offset: 10, limit: 20 },
-      sdkCtx,
+    const result = text(
+      await tools.read.execute({ filePath: "small.ts", offset: 10, limit: 20 }, sdkCtx),
     );
 
     // No footer at all — agent picked the range, has the math.
@@ -1163,13 +1158,17 @@ describe("Hoisted tool execute handlers", () => {
         : { success: true, created: false, formatted: true };
     });
 
-    const createdResult = await tools.write.execute(
-      { filePath: "created.ts", content: "export const created = true;\n" },
-      sdkCtx,
+    const createdResult = text(
+      await tools.write.execute(
+        { filePath: "created.ts", content: "export const created = true;\n" },
+        sdkCtx,
+      ),
     );
-    const updatedResult = await tools.write.execute(
-      { filePath: "created.ts", content: "export const created = false;\n" },
-      sdkCtx,
+    const updatedResult = text(
+      await tools.write.execute(
+        { filePath: "created.ts", content: "export const created = false;\n" },
+        sdkCtx,
+      ),
     );
 
     expect(createdResult).toBe("Created new file.");
@@ -1186,12 +1185,9 @@ describe("Hoisted tool execute handlers", () => {
   /// drops any file metadata entry that lacks all of `patch`, `before`, `after`.
   /// Pre-fix, AFT only sent `{ filePath, relativePath, type }`, so EVERY file
   /// was silently dropped and the TUI/desktop showed no diffs at all.
-  test("apply_patch stores per-file diff metadata for the OpenCode renderer", async () => {
+  test("apply_patch returns per-file diff metadata for the OpenCode renderer", async () => {
     tmpDir = await makeTempDir();
     sdkCtx = createMockSdkContext(tmpDir);
-    // Inject callID — required for storeToolMetadata to fire (the production
-    // ToolContext supplies it; our mock omits it by default).
-    (sdkCtx as unknown as { callID: string }).callID = "call_apply_patch_meta";
 
     const updatedFile = resolve(tmpDir, "updated.ts");
     const deletedFile = resolve(tmpDir, "deleted.ts");
@@ -1220,9 +1216,10 @@ describe("Hoisted tool execute handlers", () => {
       throw new Error(`Unexpected command: ${command}`);
     });
 
-    await tools.apply_patch.execute({ patchText }, sdkCtx);
-
-    const stored = consumeToolMetadata("test", "call_apply_patch_meta");
+    const stored = (await tools.apply_patch.execute({ patchText }, sdkCtx)) as {
+      title?: string;
+      metadata?: Record<string, unknown>;
+    };
     expect(stored).toBeDefined();
     expect(stored?.title).toContain("Success. Updated the following files:");
     expect(stored?.title).toContain("A new.ts");

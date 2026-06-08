@@ -12,10 +12,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { coerceStringArray, formatEditSummary } from "@cortexkit/aft-bridge";
-import type { ToolDefinition } from "@opencode-ai/plugin";
+import type { ToolDefinition, ToolResult } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { resolveBashConfig } from "../config.js";
-import { storeToolMetadata } from "../metadata-store.js";
 import { applyUpdateChunks, parsePatch } from "../patch-parser.js";
 import type { PluginContext } from "../types.js";
 import {
@@ -32,12 +31,6 @@ import {
   permissionDeniedResponse,
   runAsk,
 } from "./permissions.js";
-
-/** Extract callID from plugin context (exists on object but not in TS type). */
-function getCallID(ctx: unknown): string | undefined {
-  const c = ctx as { callID?: string; callId?: string; call_id?: string };
-  return c.callID ?? c.callId ?? c.call_id;
-}
 
 /** Get relative path matching opencode's format — the desktop UI parses it to extract filename + dir. */
 function relativeToWorktree(fp: string, worktree: string): string {
@@ -402,7 +395,7 @@ export function createReadTool(ctx: PluginContext): ToolDefinition {
         "1-based line number to start reading from (use with limit). Ignored if startLine is provided",
       ),
     },
-    execute: async (args, context): Promise<string> => {
+    execute: async (args, context): Promise<ToolResult> => {
       const file = args.filePath as string;
       const projectRoot = await resolveProjectRoot(ctx, context);
 
@@ -467,19 +460,16 @@ export function createReadTool(ctx: PluginContext): ToolDefinition {
               ? `${(fileSize / 1024).toFixed(0)}KB`
               : `${fileSize} bytes`;
         const msg = `${label} read successfully`;
-        const imgCallID = getCallID(context);
-        if (imgCallID) {
-          storeToolMetadata(context.sessionID, imgCallID, {
-            title: path.relative(projectRoot, filePath),
-            metadata: {
-              preview: msg,
-              filepath: filePath,
-              isImage,
-              isPdf: mime === "application/pdf",
-            },
-          });
-        }
-        return `${msg} (${ext.slice(1).toUpperCase()}, ${sizeStr}). File: ${filePath}`;
+        return {
+          output: `${msg} (${ext.slice(1).toUpperCase()}, ${sizeStr}). File: ${filePath}`,
+          title: path.relative(projectRoot, filePath),
+          metadata: {
+            preview: msg,
+            filepath: filePath,
+            isImage,
+            isPdf: mime === "application/pdf",
+          },
+        };
       }
 
       // Normalize offset/limit to startLine/endLine (backward compat with opencode's read)
@@ -506,31 +496,23 @@ export function createReadTool(ctx: PluginContext): ToolDefinition {
         throw new Error((data.message as string) || "read failed");
       }
 
-      const readCallID = getCallID(context);
+      const dp = relativeToWorktree(filePath, projectRoot) || file;
 
       // Directory response
       if (data.entries) {
-        if (readCallID) {
-          const dp = relativeToWorktree(filePath, projectRoot) || file;
-          storeToolMetadata(context.sessionID, readCallID, { title: dp, metadata: { title: dp } });
-        }
-        return (data.entries as string[]).join("\n");
+        return {
+          output: (data.entries as string[]).join("\n"),
+          title: dp,
+          metadata: { title: dp },
+        };
       }
 
       // Binary response
       if (data.binary) {
-        if (readCallID) {
-          const dp = relativeToWorktree(filePath, projectRoot) || file;
-          storeToolMetadata(context.sessionID, readCallID, { title: dp, metadata: { title: dp } });
-        }
-        return data.message as string;
+        return { output: data.message as string, title: dp, metadata: { title: dp } };
       }
 
       // File content — already line-numbered from Rust
-      if (readCallID) {
-        const dp = relativeToWorktree(filePath, projectRoot) || file;
-        storeToolMetadata(context.sessionID, readCallID, { title: dp, metadata: { title: dp } });
-      }
       let output = data.content as string;
 
       // Three-case footer: see formatReadFooter() doc.
@@ -542,7 +524,7 @@ export function createReadTool(ctx: PluginContext): ToolDefinition {
       const footer = formatReadFooter(agentSpecifiedRange, data);
       if (footer) output += footer;
 
-      return output;
+      return { output, title: dp, metadata: { title: dp } };
     },
   };
 }
@@ -580,7 +562,7 @@ function createWriteTool(ctx: PluginContext, editToolName = "edit"): ToolDefinit
       content: z.string().describe("The full content to write to the file"),
       diagnostics: z.boolean().optional().describe(DIAGNOSTICS_PARAM_DESCRIPTION),
     },
-    execute: async (args, context): Promise<string> => {
+    execute: async (args, context): Promise<ToolResult> => {
       const file = args.filePath as string;
       const content = args.content as string;
       const projectRoot = await resolveProjectRoot(ctx, context);
@@ -655,32 +637,34 @@ function createWriteTool(ctx: PluginContext, editToolName = "edit"): ToolDefinit
         output += `\n\nNote: LSP server(s) exited during this edit: ${exitedServers.join(", ")}. Their diagnostics could not be collected.`;
       }
 
-      // Store metadata for tool.execute.after hook (fromPlugin overwrites context.metadata)
+      // Return UI metadata directly on the result. OpenCode's `fromPlugin`
+      // (registry.ts) preserves a tool's returned `title`/`metadata` (since
+      // v1.4.8; our floor is far past that), so there's no need for the old
+      // module-level store + `tool.execute.after` merge — that workaround
+      // intermittently lost the diff under duplicate plugin loads (`--port 0`
+      // / Desktop) because the store Map lived in one ESM graph and the merge
+      // ran in another. See GitHub #96.
       const diff = data.diff as
         | { before?: string; after?: string; additions?: number; deletions?: number }
         | undefined;
-      const callID = getCallID(context);
-      if (callID) {
-        const dp = relativeToWorktree(filePath, projectRoot);
-        const beforeContent = diff?.before ?? "";
-        const afterContent = diff?.after ?? content;
-        storeToolMetadata(context.sessionID, callID, {
-          title: dp,
-          metadata: {
-            diff: buildUnifiedDiff(filePath, beforeContent, afterContent),
-            filediff: {
-              file: filePath,
-              before: beforeContent,
-              after: afterContent,
-              additions: diff?.additions ?? 0,
-              deletions: diff?.deletions ?? 0,
-            },
-            diagnostics: {},
+      const dp = relativeToWorktree(filePath, projectRoot);
+      const beforeContent = diff?.before ?? "";
+      const afterContent = diff?.after ?? content;
+      return {
+        output,
+        title: dp,
+        metadata: {
+          diff: buildUnifiedDiff(filePath, beforeContent, afterContent),
+          filediff: {
+            file: filePath,
+            before: beforeContent,
+            after: afterContent,
+            additions: diff?.additions ?? 0,
+            deletions: diff?.deletions ?? 0,
           },
-        });
-      }
-
-      return output;
+          diagnostics: {},
+        },
+      };
     },
   };
 }
@@ -694,45 +678,39 @@ function getEditDescription(writeToolName: string): string {
 
 **Modes** (determined by which parameters you provide):
 
-Mode priority: operations > appendContent > edits > symbol (without oldString) > oldString (find/replace). If none match, the call is rejected — there is no implicit "write" fallback.
+Mode priority: appendContent > edits > symbol (without oldString) > oldString (find/replace). If none match, the call is rejected — there is no implicit "write" fallback. To edit multiple files, make parallel \`edit\` calls in one response.
 
-1. **Multi-file transaction** — pass \`operations\` array
-   Edits across multiple files with checkpoint-based rollback on failure.
-   Each operation: \`{ "file": "path", "command": "edit_match" | "write", ... }\`.
-   For \`edit_match\`: include \`match\`, \`replacement\`. For \`write\`: include \`content\`.
-   Example: \`{ "operations": [{ "file": "a.ts", "command": "edit_match", "match": "old", "replacement": "new" }, { "file": "b.ts", "command": "write", "content": "..." }] }\`
-
-2. **Append** — pass \`filePath\` + \`appendContent\`
+1. **Append** — pass \`filePath\` + \`appendContent\`
    Appends text to the end of a file, creating the file if it does not exist.
    Example: \`{ "filePath": "notes.txt", "appendContent": "new line\\n" }\`
 
-3. **Batch edits** — pass \`filePath\` + \`edits\` array
+2. **Batch edits** — pass \`filePath\` + \`edits\` array
    Multiple edits in one file atomically. Each edit is either:
    - \`{ "oldString": "old", "newString": "new" }\` — find/replace
    - \`{ "startLine": 5, "endLine": 7, "content": "new lines" }\` — replace line range (1-based, both inclusive)
    Set content to empty string to delete lines.
 
-4. **Symbol replace** — pass \`filePath\` + \`symbol\` + \`content\`
+3. **Symbol replace** — pass \`filePath\` + \`symbol\` + \`content\`
    Replaces an entire named symbol (function, class, type) with new content.
    Includes decorators, attributes, and doc comments in the replacement range.
    **Important:** You must NOT provide \`oldString\` when using symbol mode — if present, the tool silently falls back to find/replace mode.
    Example: \`{ "filePath": "src/app.ts", "symbol": "handleRequest", "content": "function handleRequest() { ... }" }\`
 
-5. **Find and replace** — pass \`filePath\` + \`oldString\` + \`newString\`
+4. **Find and replace** — pass \`filePath\` + \`oldString\` + \`newString\`
    Finds the exact text in \`oldString\` and replaces it with \`newString\`.
    Supports fuzzy matching (handles whitespace differences automatically).
    If multiple matches exist, specify which one with \`occurrence\` or use \`replaceAll: true\`.
    Example: \`{ "filePath": "src/app.ts", "oldString": "const x = 1", "newString": "const x = 2" }\`
 
-6. **Replace all occurrences** — add \`replaceAll: true\`
+5. **Replace all occurrences** — add \`replaceAll: true\`
    Replaces every occurrence of \`oldString\` in the file.
    Example: \`{ "filePath": "src/app.ts", "oldString": "oldName", "newString": "newName", "replaceAll": true }\`
 
-7. **Select specific occurrence** — add \`occurrence: N\` (0-indexed)
+6. **Select specific occurrence** — add \`occurrence: N\` (0-indexed)
    When multiple matches exist, select the Nth one (0 = first, 1 = second, etc.).
    Example: \`{ "filePath": "src/app.ts", "oldString": "TODO", "newString": "DONE", "occurrence": 0 }\`
 
-Note: Modes 6 and 7 are options on mode 5 (find/replace) — they require \`oldString\`.
+Note: Modes 5 and 6 are options on mode 4 (find/replace) — they require \`oldString\`.
 
 **Behavior:**
 - Backs up files before editing (recoverable via aft_safety undo)
@@ -750,9 +728,7 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
       filePath: z
         .string()
         .optional()
-        .describe(
-          "Path to the file to edit (absolute or relative to project root). Required for all modes except 'operations' multi-file transactions",
-        ),
+        .describe("Path to the file to edit (absolute or relative to project root)"),
       oldString: z.string().optional().describe("Text to find (exact match, with fuzzy fallback)"),
       newString: z
         .string()
@@ -767,7 +743,7 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
         .string()
         .optional()
         .describe(
-          "Replacement content for symbol mode or operations[].command='write'. For whole-file writes, use the `write` tool.",
+          "Replacement content for symbol mode. For whole-file writes, use the `write` tool.",
         ),
       appendContent: z
         .string()
@@ -779,15 +755,9 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
         .describe(
           "Batch edits — array of { oldString: string, newString: string } or { startLine: number (1-based), endLine: number (1-based, inclusive), content: string }",
         ),
-      operations: z
-        .array(z.record(z.string(), z.unknown()))
-        .optional()
-        .describe(
-          "Transaction — array of { file: string, command: 'edit_match' | 'write', match?: string, replacement?: string, content?: string } for multi-file edits with rollback. Note: uses 'file'/'match'/'replacement' (not filePath/oldString/newString)",
-        ),
       diagnostics: z.boolean().optional().describe(DIAGNOSTICS_PARAM_DESCRIPTION),
     },
-    execute: async (args, context): Promise<string> => {
+    execute: async (args, context): Promise<ToolResult> => {
       // Footgun guard: top-level startLine/endLine are not valid params on
       // edit. They only exist nested inside `edits[]` for batch line-range
       // mode. Without this guard, Zod silently strips the unknown keys and
@@ -801,50 +771,6 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
             '`edits: [{ startLine: N, endLine: M, content: "..." }]`. ' +
             "For find/replace, use `oldString`/`newString` instead.",
         );
-      }
-
-      // Transaction mode — multi-file
-      if (Array.isArray(args.operations)) {
-        const ops = args.operations as Array<Record<string, unknown>>;
-        const files = ops.map((op) => op.file as string).filter(Boolean);
-        const projectRoot = await resolveProjectRoot(ctx, context);
-
-        // External-directory check first (mirrors opencode-native edit.ts:68).
-        {
-          const asked = new Set<string>();
-          for (const file of files) {
-            const absPath = resolvePathFromProjectRoot(projectRoot, file);
-            if (asked.has(absPath)) continue;
-            asked.add(absPath);
-            const denial = await assertExternalDirectoryPermission(context, absPath);
-            if (denial) return permissionDeniedResponse(denial);
-          }
-        }
-
-        await runAsk(
-          context.ask({
-            permission: "edit",
-            patterns: files.map((f) =>
-              path.relative(projectRoot, resolvePathFromProjectRoot(projectRoot, f)),
-            ),
-            always: ["*"],
-            metadata: {},
-          }),
-        );
-
-        const resolvedOps = ops.map((op) => ({
-          ...op,
-          file: resolvePathFromProjectRoot(projectRoot, op.file as string),
-        }));
-
-        const response = await callBridge(ctx, context, "transaction", { operations: resolvedOps });
-        if (response.success === false) {
-          throw new Error((response.message as string | undefined) ?? "transaction failed");
-        }
-        // Compact summary instead of the raw JSON envelope. Multi-file
-        // transactions report `files_modified`; formatEditSummary turns that
-        // into "Applied edits to N files." Per-file diffs live in UI metadata.
-        return formatEditSummary(response as Record<string, unknown>);
       }
 
       const file = args.filePath as string;
@@ -922,7 +848,7 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
         const hint =
           typeof args.content === "string"
             ? ` To write the whole file, use the '${writeToolName}' tool. To edit existing content, provide 'oldString' (and optionally 'newString'), 'symbol' + 'content', or an 'edits' array.`
-            : " Provide 'oldString' (+ optional 'newString'), 'symbol' + 'content', 'edits' array, or 'operations' array.";
+            : " Provide 'oldString' (+ optional 'newString'), 'symbol' + 'content', or an 'edits' array.";
         throw new Error(`edit: no edit mode resolved from arguments.${hint}`);
       }
 
@@ -932,7 +858,11 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
 
       const data = await callBridge(ctx, context, command, params);
 
-      // Store metadata for tool.execute.after hook (fromPlugin overwrites context.metadata)
+      // UI metadata returned directly on the result (see write tool for the
+      // rationale; replaces the old metadata-store + after-hook merge that
+      // intermittently lost the diff under duplicate plugin loads — GitHub #96).
+      let uiMeta: Record<string, unknown> | undefined;
+      let uiTitle: string | undefined;
       if (data.success && data.diff) {
         const diff = data.diff as {
           before?: string;
@@ -940,26 +870,20 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
           additions?: number;
           deletions?: number;
         };
-        const callID = getCallID(context);
-        if (callID) {
-          const dp = relativeToWorktree(filePath, projectRoot);
-          const beforeContent = diff.before ?? "";
-          const afterContent = diff.after ?? "";
-          storeToolMetadata(context.sessionID, callID, {
-            title: dp,
-            metadata: {
-              diff: buildUnifiedDiff(filePath, beforeContent, afterContent),
-              filediff: {
-                file: filePath,
-                before: beforeContent,
-                after: afterContent,
-                additions: diff.additions ?? 0,
-                deletions: diff.deletions ?? 0,
-              },
-              diagnostics: {},
-            },
-          });
-        }
+        uiTitle = relativeToWorktree(filePath, projectRoot);
+        const beforeContent = diff.before ?? "";
+        const afterContent = diff.after ?? "";
+        uiMeta = {
+          diff: buildUnifiedDiff(filePath, beforeContent, afterContent),
+          filediff: {
+            file: filePath,
+            before: beforeContent,
+            after: afterContent,
+            additions: diff.additions ?? 0,
+            deletions: diff.deletions ?? 0,
+          },
+          diagnostics: {},
+        };
       }
 
       // Agent-facing result is a compact summary sentence, NOT the raw Rust
@@ -1007,6 +931,9 @@ function createEditTool(ctx: PluginContext, writeToolName = "write"): ToolDefini
         result += `\n\nNote: LSP server(s) exited during this edit: ${exitedServers.join(", ")}. Their diagnostics could not be collected.`;
       }
 
+      if (uiMeta) {
+        return { output: result, title: uiTitle ?? "", metadata: uiMeta };
+      }
       return result;
     },
   };
@@ -1078,7 +1005,7 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
       patchText: z.string().describe("The full patch text including Begin/End markers"),
       diagnostics: z.boolean().optional().describe(DIAGNOSTICS_PARAM_DESCRIPTION),
     },
-    execute: async (args, context): Promise<string> => {
+    execute: async (args, context): Promise<ToolResult> => {
       const patchText = args.patchText as string;
       const diagnostics = args.diagnostics ?? diagnosticsOnEditDefault(ctx);
       if (!patchText) throw new Error("'patchText' is required");
@@ -1442,9 +1369,10 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
         }
       }
 
-      // Store metadata for tool.execute.after hook (match opencode built-in format)
-      const callID = getCallID(context);
-      if (callID) {
+      // UI metadata returned directly on the result (matches opencode built-in
+      // apply_patch shape). Replaces the old metadata-store + after-hook merge
+      // that intermittently lost diffs under duplicate plugin loads (#96).
+      {
         // Index per-file diffs by absolute filePath for fast lookup when
         // building the metadata.files array. Each entry NEEDS to carry the
         // per-file `patch` string plus `additions`/`deletions` counts —
@@ -1521,16 +1449,15 @@ function createApplyPatchTool(ctx: PluginContext): ToolDefinition {
           .filter(Boolean)
           .join("\n");
 
-        storeToolMetadata(context.sessionID, callID, {
+        return {
+          output: results.join("\n"),
           title,
           metadata: {
             diff: diffText,
             files,
           },
-        });
+        };
       }
-
-      return results.join("\n");
     },
   };
 }

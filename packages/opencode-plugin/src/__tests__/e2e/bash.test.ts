@@ -133,8 +133,9 @@ maybeDescribe("e2e bash command (OpenCode adapter + bridge + Rust)", () => {
       ask: options.ask ?? noopAsk,
       callID: `call-${Date.now()}`,
     } as ToolContext;
-    const output = await bash.execute(args, context);
-    return { output: typeof output === "string" ? output : String(output), metadata: lastMetadata };
+    const result = await bash.execute(args, context);
+    const output = typeof result === "string" ? result : (result?.output ?? "");
+    return { output, metadata: lastMetadata };
   }
 
   async function bridgeBashToTerminal(

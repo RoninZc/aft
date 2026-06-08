@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 use aft::commands::delete_file::handle_delete_file;
 use aft::commands::lsp_diagnostics::handle_lsp_diagnostics;
 use aft::commands::move_file::handle_move_file;
-use aft::commands::transaction::handle_transaction;
 use aft::commands::write::handle_write;
 use aft::config::{Config, UserServerDef};
 use aft::context::AppContext;
@@ -161,28 +160,6 @@ fn drain_watched_file_events_from_ctx(ctx: &AppContext) -> Vec<serde_json::Value
             _ => None,
         })
         .collect()
-}
-
-fn collect_watched_file_events_from_ctx_before_deadline(
-    ctx: &AppContext,
-    duration: Duration,
-) -> Option<serde_json::Value> {
-    let deadline = Instant::now() + duration;
-    while Instant::now() < deadline {
-        if let Some(event) = collect_event(&mut ctx.lsp(), |event| {
-            matches!(
-                event,
-                LspEvent::Notification { method, .. } if method == "custom/watchedFilesChanged"
-            )
-        }) {
-            return match event {
-                LspEvent::Notification { params, .. } => params,
-                _ => None,
-            };
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    None
 }
 
 fn config_change_type(params: &serde_json::Value, suffix: &str) -> i64 {
@@ -489,56 +466,6 @@ fn move_file_reports_deleted_source_and_created_destination_for_config_file() {
     ];
     event_types.sort_unstable();
     assert_eq!(event_types, vec![1, 3]);
-}
-
-#[test]
-fn transaction_rollback_does_not_notify_lsp_for_reverted_file() {
-    let (_temp_dir, root, files) = typescript_workspace_with_files(&["open.ts"]);
-    let source = &files[0];
-    let first = root.join("txn_first.ts");
-    let second = root.join("txn_second.ts");
-    let original_first = "export const first = 1;\n";
-    let original_second = "export const second = 1;\n";
-    fs::write(&first, original_first).expect("write first");
-    fs::write(&second, original_second).expect("write second");
-
-    let config = Config {
-        project_root: Some(root.clone()),
-        ..Config::default()
-    };
-    let ctx = AppContext::new(Box::new(TreeSitterProvider::new()), config);
-    ctx.lsp()
-        .override_binary(ServerKind::TypeScript, fake_server_path());
-    ctx.lsp_notify_file_changed(source, "export const value = 2;\n");
-    wait_for_publish(&mut ctx.lsp());
-
-    let req: RawRequest = serde_json::from_value(serde_json::json!({
-        "id": "txn-lsp-rollback",
-        "command": "transaction",
-        "operations": [
-            {"file": first.display().to_string(), "command": "write", "content": "export const first = 2;\n"},
-            {"file": second.display().to_string(), "command": "write", "content": "export const second = {;\n"}
-        ]
-    }))
-    .expect("request parses");
-    let response = handle_transaction(&req, &ctx);
-    let json = serde_json::to_value(&response).expect("response serializes");
-    assert_eq!(json["success"], false, "transaction should fail: {json}");
-    assert_eq!(
-        fs::read_to_string(&first).expect("read first"),
-        original_first
-    );
-    assert_eq!(
-        fs::read_to_string(&second).expect("read second"),
-        original_second
-    );
-
-    let notified =
-        collect_watched_file_events_from_ctx_before_deadline(&ctx, Duration::from_millis(250));
-    assert!(
-        notified.is_none(),
-        "unexpected LSP watched-file notification: {notified:?}"
-    );
 }
 
 #[test]

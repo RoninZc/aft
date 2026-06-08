@@ -3,12 +3,11 @@ import {
   maybeStripCompressorPipe,
   resolveBashKillTimeout,
 } from "@cortexkit/aft-bridge";
-import type { ToolContext, ToolDefinition } from "@opencode-ai/plugin";
+import type { ToolContext, ToolDefinition, ToolResult } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { trackBgTask } from "../bg-notifications.js";
 import { resolveBashConfig } from "../config.js";
 import { sessionLog } from "../logger.js";
-import { storeToolMetadata } from "../metadata-store.js";
 import {
   disposePtyTerminal,
   getOrCreatePtyTerminal,
@@ -241,21 +240,15 @@ export function createBashTool(ctx: PluginContext): ToolDefinition {
       }
 
       if (data.status === "running" && typeof data.task_id === "string") {
-        const callID = getCallID(context);
         const taskId = data.task_id;
+        const uiTitle = description ?? shortenCommand(command);
         if (effectiveBackground) {
           trackBgTask(context.sessionID, taskId);
           let startedLine = formatBackgroundLaunch(taskId, requestedPty);
           if (isSubagent && allowSubagentBg) startedLine += subagentGuidance(taskId);
           const metadataPayload = { description, output: startedLine, status: "running", taskId };
           metadata?.(metadataPayload);
-          if (callID) {
-            storeToolMetadata(context.sessionID, callID, {
-              title: description ?? shortenCommand(command),
-              metadata: metadataPayload,
-            });
-          }
-          return startedLine;
+          return { output: startedLine, title: uiTitle, metadata: metadataPayload };
         }
 
         // Wait-window is decoupled from `args.timeout`. For primary sessions
@@ -295,13 +288,7 @@ export function createBashTool(ctx: PluginContext): ToolDefinition {
             const rendered = appendPipeStripNote(formatForegroundResult(status), pipeStrip.note);
             const metadataPayload = foregroundMetadata(description, status, rendered);
             metadata?.(metadataPayload);
-            if (callID) {
-              storeToolMetadata(context.sessionID, callID, {
-                title: description ?? shortenCommand(command),
-                metadata: metadataPayload,
-              });
-            }
-            return rendered;
+            return { output: rendered, title: uiTitle, metadata: metadataPayload };
           }
           if (Date.now() - startedAt >= waitTimeoutMs) {
             if (subagentForcedForeground) {
@@ -319,13 +306,7 @@ export function createBashTool(ctx: PluginContext): ToolDefinition {
             if (isSubagent && allowSubagentBg) message += subagentGuidance(taskId);
             const metadataPayload = { description, output: message, status: "running", taskId };
             metadata?.(metadataPayload);
-            if (callID) {
-              storeToolMetadata(context.sessionID, callID, {
-                title: description ?? shortenCommand(command),
-                metadata: metadataPayload,
-              });
-            }
-            return message;
+            return { output: message, title: uiTitle, metadata: metadataPayload };
           }
           await sleep(FOREGROUND_POLL_INTERVAL_MS);
         }
@@ -337,7 +318,6 @@ export function createBashTool(ctx: PluginContext): ToolDefinition {
       const truncated = data.truncated as boolean | undefined;
       const outputPath = data.output_path as string | undefined;
       const timedOut = data.timed_out === true;
-      const callID = getCallID(context);
       const metadataPayload = {
         description,
         output: metadataOutput,
@@ -347,12 +327,6 @@ export function createBashTool(ctx: PluginContext): ToolDefinition {
       };
 
       metadata?.(metadataPayload);
-      if (callID) {
-        storeToolMetadata(context.sessionID, callID, {
-          title: description ?? shortenCommand(command),
-          metadata: metadataPayload,
-        });
-      }
 
       // Agent-visible output is the raw bash output (matches OpenCode's native
       // bash contract). Exit code, truncation, output path are UI metadata —
@@ -372,7 +346,11 @@ export function createBashTool(ctx: PluginContext): ToolDefinition {
         rendered += `\n[exit code: ${exit}]`;
       }
       rendered = appendPipeStripNote(rendered, pipeStrip.note);
-      return rendered;
+      return {
+        output: rendered,
+        title: description ?? shortenCommand(command),
+        metadata: metadataPayload,
+      };
     },
   };
 }

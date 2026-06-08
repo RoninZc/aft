@@ -53,7 +53,6 @@ pub mod status;
 pub mod trace_data;
 pub mod trace_to;
 pub mod trace_to_symbol;
-pub mod transaction;
 pub mod trust_filter_project;
 pub mod undo;
 pub mod untrust_filter_project;

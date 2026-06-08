@@ -1,18 +1,11 @@
 import { formatZoomMultiTargetResult, formatZoomText } from "@cortexkit/aft-bridge";
-import type { ToolContext, ToolDefinition } from "@opencode-ai/plugin";
+import type { ToolContext, ToolDefinition, ToolResult } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
-import { storeToolMetadata } from "../metadata-store.js";
 import type { PluginContext } from "../types.js";
 import { callBridge, isEmptyParam, optionalInt, resolvePathArg } from "./_shared.js";
 import { assertExternalDirectoryPermission, permissionDeniedResponse } from "./permissions.js";
 
 const z = tool.schema;
-
-/** Read the OpenCode runtime callID off the tool context (shape varies by host version). */
-function getCallID(ctx: unknown): string | undefined {
-  const c = ctx as { callID?: string; callId?: string; call_id?: string };
-  return c.callID ?? c.callId ?? c.call_id;
-}
 
 /** Build a short TUI title for an `aft_zoom` invocation, based on which mode the agent used. */
 function buildZoomTitle(args: {
@@ -260,7 +253,7 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
             "Include call-graph annotations (calls-out / called-by within the same file). Default false; off keeps zoom output minimal.",
           ),
       },
-      execute: async (args, context): Promise<string> => {
+      execute: async (args, context): Promise<ToolResult> => {
         // GPT-family models send empty strings / empty arrays / empty objects
         // instead of omitting optional params. Use `isEmptyParam` so e.g.
         // `targets: []` or `url: ""` don't trigger mutual-exclusion errors
@@ -291,26 +284,30 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
         const hasSymbols = !isEmptyParam(args.symbols);
         const wantCallgraph = args.callgraph === true;
 
-        // Set TUI title + scalar metadata BEFORE any bridge call so even
-        // errors render with a meaningful tool-call header. OpenCode's UI
+        // TUI title + scalar metadata for the tool-call header. OpenCode's UI
         // only auto-renders SCALAR args (strings, numbers, booleans) — arrays
         // and objects are dropped from the `[key=value, ...]` line. Stringify
         // collection-shaped args here so `targets`/`symbols` stay visible.
-        const zoomCallID = getCallID(context);
-        if (zoomCallID) {
-          const title = buildZoomTitle(args);
-          const display: Record<string, unknown> = { title };
-          if (hasFilePath) display.filePath = args.filePath;
-          if (hasUrl) display.url = args.url;
-          if (hasSymbols) {
-            display.symbols =
-              typeof args.symbols === "string" ? args.symbols : JSON.stringify(args.symbols);
-          }
-          if (hasTargets) display.targets = JSON.stringify(args.targets);
-          if (args.contextLines !== undefined) display.contextLines = args.contextLines;
-          if (wantCallgraph) display.callgraph = true;
-          storeToolMetadata(context.sessionID, zoomCallID, { title, metadata: display });
+        // Attached to every successful return via `withMeta`. (Error paths
+        // can't carry a title: OpenCode skips `tool.execute.after` when execute
+        // throws, and the plugin `context.metadata()` callback is unbridged, so
+        // the return value is the only channel that survives.)
+        const zoomTitle = buildZoomTitle(args);
+        const zoomDisplay: Record<string, unknown> = { title: zoomTitle };
+        if (hasFilePath) zoomDisplay.filePath = args.filePath;
+        if (hasUrl) zoomDisplay.url = args.url;
+        if (hasSymbols) {
+          zoomDisplay.symbols =
+            typeof args.symbols === "string" ? args.symbols : JSON.stringify(args.symbols);
         }
+        if (hasTargets) zoomDisplay.targets = JSON.stringify(args.targets);
+        if (args.contextLines !== undefined) zoomDisplay.contextLines = args.contextLines;
+        if (wantCallgraph) zoomDisplay.callgraph = true;
+        const withMeta = (output: string): ToolResult => ({
+          output,
+          title: zoomTitle,
+          metadata: zoomDisplay,
+        });
 
         // Multi-target mode (cross-file). Mutually exclusive with the other
         // modes so the agent doesn't accidentally provide overlapping inputs
@@ -360,7 +357,7 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
             name: t.symbol,
             response: responses[i] ?? { success: false, message: "missing zoom response" },
           }));
-          return formatZoomMultiTargetResult(entries).text;
+          return withMeta(formatZoomMultiTargetResult(entries).text);
         }
 
         if (!hasFilePath && !hasUrl) {
@@ -411,9 +408,9 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
                 ((response as { message?: string }).message as string) || "zoom failed",
               );
             }
-            return formatZoomText(targetLabel, response as Record<string, unknown>);
+            return withMeta(formatZoomText(targetLabel, response as Record<string, unknown>));
           }
-          return formatZoomBatchResult(targetLabel, symbolsArray, results).text;
+          return withMeta(formatZoomBatchResult(targetLabel, symbolsArray, results).text);
         }
 
         // No symbols specified: zoom by line-range fallback (or whole file).
@@ -425,7 +422,7 @@ export function readingTools(ctx: PluginContext): Record<string, ToolDefinition>
         if (data.success === false) {
           throw new Error((data.message as string) || "zoom failed");
         }
-        return formatZoomText(targetLabel, data);
+        return withMeta(formatZoomText(targetLabel, data));
       },
     },
   };
