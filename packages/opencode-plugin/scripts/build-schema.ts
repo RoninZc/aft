@@ -18,7 +18,7 @@
 
 import * as path from "node:path";
 
-const SCHEMA_URL = "https://raw.githubusercontent.com/cortexkit/aft/master/assets/aft.schema.json";
+const SCHEMA_URL = "https://raw.githubusercontent.com/cortexkit/aft/main/assets/aft.schema.json";
 
 function buildSchema(): Record<string, unknown> {
   const formatterEnum = {

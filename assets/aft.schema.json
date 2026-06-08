@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://raw.githubusercontent.com/cortexkit/aft/master/assets/aft.schema.json",
+  "$id": "https://raw.githubusercontent.com/cortexkit/aft/main/assets/aft.schema.json",
   "title": "AFT Configuration",
   "description": "Configuration schema for the @cortexkit/aft-opencode and @cortexkit/aft-pi plugins. Place as aft.jsonc in ~/.config/opencode/, <project>/.opencode/, ~/.pi/agent/, or <project>/.pi/.",
   "type": "object",

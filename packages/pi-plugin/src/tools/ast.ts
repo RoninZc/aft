@@ -311,7 +311,7 @@ export function registerAstTools(pi: ExtensionAPI, ctx: PluginContext, surface: 
         // project_root instead of round-tripping a useless empty scope.
         if (!isEmptyParam(paths)) req.paths = paths;
         if (!isEmptyParam(params.globs)) req.globs = params.globs;
-        if (params.contextLines !== undefined) req.context_lines = params.contextLines;
+        if (params.contextLines !== undefined) req.context = params.contextLines;
         const response = await callBridge(bridge, "ast_search", req, extCtx);
         return textResult((response.text as string | undefined) ?? JSON.stringify(response));
       },
