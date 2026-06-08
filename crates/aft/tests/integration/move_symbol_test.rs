@@ -185,6 +185,43 @@ fn move_symbol_skips_build_artifacts_and_gitignored_files() {
     aft.shutdown();
 }
 
+/// A tracked consumer inside a HIDDEN directory (e.g. `.storybook/`) must still
+/// be rewritten — `.hidden(false)` in the consumer walk. Skipping it (as the
+/// shared `walk_project_files` would, with `.hidden(true)`) leaves a dangling
+/// import after the move.
+#[test]
+fn move_symbol_rewrites_consumers_in_hidden_dirs() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let root = tmp.path().display().to_string();
+    let foo = tmp.path().join("src/foo.ts");
+    let bar = tmp.path().join("src/bar.ts");
+    // Tracked consumer in a hidden dir (Storybook config, not gitignored).
+    let hidden_consumer = tmp.path().join(".storybook/preview.ts");
+
+    write_file(&foo, "export function Foo() { return 1; }\n");
+    write_file(&bar, "export const Bar = 2;\n");
+    write_file(
+        &hidden_consumer,
+        "import { Foo } from '../src/foo';\nexport const x = Foo();\n",
+    );
+
+    let mut aft = AftProcess::spawn();
+    configure(&mut aft, &root);
+    let resp = aft.send(&format!(
+        r#"{{"id":"hidden-consumer","command":"move_symbol","file":{},"symbol":"Foo","destination":{}}}"#,
+        crate::helpers::json_string(&foo.display()),
+        crate::helpers::json_string(&bar.display())
+    ));
+    assert_eq!(resp["success"], true, "move should succeed: {resp:?}");
+
+    let content = std::fs::read_to_string(&hidden_consumer).expect("read hidden consumer");
+    assert!(
+        content.contains("from '../src/bar'"),
+        "tracked consumer in .storybook/ should be rewritten to ../src/bar:\n{content}"
+    );
+    aft.shutdown();
+}
+
 // ---------------------------------------------------------------------------
 // Success path tests
 // ---------------------------------------------------------------------------

@@ -522,7 +522,7 @@ fn render_inspect_text(
         details,
         "unused_exports",
     );
-    render_todos(&mut lines, summary);
+    render_todos(&mut lines, summary, details);
 
     lines.join("\n")
 }
@@ -641,7 +641,11 @@ fn render_group_category(
     }
 }
 
-fn render_todos(lines: &mut Vec<String>, summary: &Map<String, Value>) {
+fn render_todos(
+    lines: &mut Vec<String>,
+    summary: &Map<String, Value>,
+    details: &Map<String, Value>,
+) {
     let Some(section) = summary.get("todos") else {
         return;
     };
@@ -670,6 +674,18 @@ fn render_todos(lines: &mut Vec<String>, summary: &Map<String, Value>) {
     } else {
         lines.push(format!("TODOs: {count} ({by_kind})"));
     }
+    // Detail rows only when explicitly drilled into (sections: ["todos"]) — the
+    // scanner populates details["todos"] only then, keeping the default summary
+    // compact while honoring an explicit request for the items.
+    if let Some(items) = details.get("todos").and_then(Value::as_array) {
+        for item in items {
+            let file = item.get("file").and_then(Value::as_str).unwrap_or("?");
+            let line = item.get("line").and_then(Value::as_u64).unwrap_or(0);
+            let marker = item.get("marker").and_then(Value::as_str).unwrap_or("?");
+            let text = item.get("text").and_then(Value::as_str).unwrap_or("");
+            lines.push(format!("  {file}:{line} {marker} {text}"));
+        }
+    }
 }
 
 fn summary_for(category: InspectCategory, outcome: Option<&JobOutcome>) -> Value {
@@ -687,11 +703,17 @@ fn summary_for(category: InspectCategory, outcome: Option<&JobOutcome>) -> Value
         ..
     } = outcome
     {
-        let mut summary = computed_summary_for(category, Some(payload));
-        if let Some(obj) = summary.as_object_mut() {
-            obj.insert("stale".to_string(), Value::Bool(true));
+        // Defensive: only surface counts when the cached payload actually has a
+        // real `count`. All Tier-2 stale categories are count-based, so a
+        // payload without one is malformed — fall through to the sentinel rather
+        // than render a fabricated `0` that would read as "clean".
+        if payload.get("count").and_then(Value::as_u64).is_some() {
+            let mut summary = computed_summary_for(category, Some(payload));
+            if let Some(obj) = summary.as_object_mut() {
+                obj.insert("stale".to_string(), Value::Bool(true));
+            }
+            return summary;
         }
-        return summary;
     }
     if let Some(status) = outcome.summary_status() {
         return status_summary(status);
@@ -1013,6 +1035,46 @@ mod render_text_tests {
 
     fn render(summary: Value) -> String {
         render_inspect_text(&summary_map(summary), &Map::new(), &[], &[], &[])
+    }
+
+    fn render_with_details(summary: Value, details: Value) -> String {
+        render_inspect_text(&summary_map(summary), &summary_map(details), &[], &[], &[])
+    }
+
+    #[test]
+    fn renders_todo_detail_rows_when_drilled_into() {
+        let text = render_with_details(
+            serde_json::json!({ "todos": { "count": 2, "by_kind": { "BUG": 1, "TODO": 1 } } }),
+            serde_json::json!({
+                "todos": [
+                    { "file": "src/a.ts", "line": 10, "marker": "BUG", "text": "leak here" },
+                    { "file": "src/b.ts", "line": 4, "marker": "TODO", "text": "wire it" },
+                ]
+            }),
+        );
+        // Summary line still present, plus per-item rows.
+        assert!(
+            text.contains("TODOs: 2 (BUG 1, TODO 1)"),
+            "summary:\n{text}"
+        );
+        assert!(
+            text.contains("  src/a.ts:10 BUG leak here"),
+            "row a:\n{text}"
+        );
+        assert!(text.contains("  src/b.ts:4 TODO wire it"), "row b:\n{text}");
+    }
+
+    #[test]
+    fn omits_todo_detail_rows_without_drill_in() {
+        // No details → count/by_kind only, no per-item rows (default compact).
+        let text = render(serde_json::json!({
+            "todos": { "count": 2, "by_kind": { "BUG": 1, "TODO": 1 } }
+        }));
+        assert!(
+            text.contains("TODOs: 2 (BUG 1, TODO 1)"),
+            "summary:\n{text}"
+        );
+        assert!(!text.contains("\n  "), "no detail rows expected:\n{text}");
     }
 
     #[test]

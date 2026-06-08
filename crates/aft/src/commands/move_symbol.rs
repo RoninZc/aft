@@ -905,14 +905,50 @@ fn append_symbol_to_dest(dest_content: &str, symbol_text: &str) -> String {
 }
 
 /// Collect TS/JS/TSX files in the project to scan for references to the moved
-/// symbol. Uses the shared project walker so it respects `.gitignore` /
-/// `.aftignore` and skips standard build/cache/VCS directories (node_modules,
-/// target, dist, build, .venv, venv, .git, __pycache__, .tox). A manual walk
-/// here previously only skipped `node_modules`, which both scanned thousands of
-/// irrelevant files in hybrid Rust/JS workspaces (slow / timeout) and rewrote
-/// imports inside compiled artifacts under dist/build (corrupting build output).
+/// symbol.
+///
+/// Respects `.gitignore` / `.aftignore` (so gitignored compiled output under
+/// `dist/`/`build/` is NOT rewritten — the corruption bug this guards against)
+/// and skips heavy non-source dirs (node_modules, target, .git, dist, build, …).
+/// Unlike the shared `walk_project_files`, it deliberately includes HIDDEN dirs
+/// (`.hidden(false)`), so tracked consumers in `.storybook/`, `.config/`, etc.
+/// are still found and rewritten — otherwise the move leaves dangling imports in
+/// them. The `dist`/`build` name-exclusion is kept (a deliberate prior decision:
+/// un-gitignored compiled output stays untouched); a tracked *source* dir named
+/// literally `build/` is a known, rare limitation.
 fn collect_ts_js_files(root: &Path, out: &mut Vec<PathBuf>, source_path: &Path, dest_path: &Path) {
-    for path in crate::callgraph::walk_project_files(root) {
+    use ignore::WalkBuilder;
+
+    let walker = WalkBuilder::new(root)
+        .hidden(false) // include .storybook/, .config/, etc. (tracked consumers)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .add_custom_ignore_filename(".aftignore")
+        .filter_entry(|entry| {
+            if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+                return !matches!(
+                    entry.file_name().to_string_lossy().as_ref(),
+                    "node_modules"
+                        | "target"
+                        | ".git"
+                        | "__pycache__"
+                        | ".tox"
+                        | ".venv"
+                        | "venv"
+                        | "dist"
+                        | "build"
+                );
+            }
+            true
+        })
+        .build();
+
+    for entry in walker.filter_map(|e| e.ok()) {
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            continue;
+        }
+        let path = entry.into_path();
         if !matches!(
             detect_language(&path),
             Some(LangId::TypeScript | LangId::Tsx | LangId::JavaScript)
