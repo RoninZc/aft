@@ -448,8 +448,25 @@ fn build_inspect_payload(
         .collect::<Vec<_>>();
     let tier2_last_run = tier2_last_run(snapshot);
 
+    // Compact, line-oriented agent text (single source for both harnesses; the
+    // plugins prefer `response.text` and fall back to JSON only when absent).
+    // Renders the Tier-2 findings + todos + an honesty note. Diagnostics are
+    // appended by the plugin layer (it owns the partial/pending honesty logic),
+    // and the status bar is appended by the plugin's global hook — so neither
+    // is rendered here. Metrics and scanner_state stay in the JSON wire payload
+    // for the sidebar but are intentionally omitted from the agent text. Built
+    // before `summary`/`details` are moved into the payload below.
+    let text = render_inspect_text(
+        &summary,
+        &details,
+        &stale_categories,
+        &pending_categories,
+        &failed_categories,
+    );
+
     let mut payload = serde_json::json!({
         "summary": Value::Object(summary),
+        "text": text,
         "scanner_state": {
             "tier2_last_run": tier2_last_run,
             "tier2_trigger_reason": ctx.tier2_trigger_reason(),
@@ -465,10 +482,217 @@ fn build_inspect_payload(
     payload
 }
 
+/// Render the compact agent-facing body. One source of truth for OpenCode + Pi.
+fn render_inspect_text(
+    summary: &Map<String, Value>,
+    details: &Map<String, Value>,
+    stale: &[String],
+    pending: &[String],
+    failed: &[Value],
+) -> String {
+    let mut lines: Vec<String> = Vec::new();
+
+    // Honesty note first, only when there's something incomplete to flag.
+    let mut notes: Vec<String> = Vec::new();
+    for cat in stale {
+        notes.push(format!("{cat} stale"));
+    }
+    for cat in pending {
+        // Diagnostics pending is surfaced by the plugin's diagnostics line.
+        if cat != "diagnostics" {
+            notes.push(format!("{cat} pending"));
+        }
+    }
+    for entry in failed {
+        if let Some(cat) = entry.get("category").and_then(Value::as_str) {
+            notes.push(format!("{cat} failed"));
+        }
+    }
+    if !notes.is_empty() {
+        lines.push(format!("note: {}", notes.join(", ")));
+    }
+
+    // Tier-2 findings, highest-signal first.
+    render_group_category(&mut lines, "Duplicates", summary, details, "duplicates");
+    render_symbol_category(&mut lines, "Dead code", summary, details, "dead_code");
+    render_symbol_category(
+        &mut lines,
+        "Unused exports",
+        summary,
+        details,
+        "unused_exports",
+    );
+    render_todos(&mut lines, summary);
+
+    lines.join("\n")
+}
+
+/// Pick the fuller drill-down list when present (sections requested), else the
+/// summary's ranked `top` preview.
+fn category_items<'a>(
+    summary: &'a Map<String, Value>,
+    details: &'a Map<String, Value>,
+    key: &str,
+) -> Option<&'a Vec<Value>> {
+    details
+        .get(key)
+        .and_then(Value::as_array)
+        .filter(|items| !items.is_empty())
+        .or_else(|| {
+            summary
+                .get(key)
+                .and_then(|s| s.get("top"))
+                .and_then(Value::as_array)
+        })
+}
+
+/// Categories whose findings are `{file, symbol}` (dead_code, unused_exports).
+fn render_symbol_category(
+    lines: &mut Vec<String>,
+    label: &str,
+    summary: &Map<String, Value>,
+    details: &Map<String, Value>,
+    key: &str,
+) {
+    let Some(section) = summary.get(key) else {
+        return;
+    };
+    if let Some(status) = section.get("status").and_then(Value::as_str) {
+        lines.push(format!("{label}: {status}"));
+        return;
+    }
+    let count = section.get("count").and_then(Value::as_u64).unwrap_or(0);
+    let suffix = dead_code_language_suffix(section);
+    if count == 0 {
+        lines.push(format!("{label}: 0"));
+        return;
+    }
+    lines.push(format!("{label}: {count}{suffix}:"));
+    if let Some(items) = category_items(summary, details, key) {
+        for item in items {
+            let file = item.get("file").and_then(Value::as_str).unwrap_or("?");
+            let symbol = item.get("symbol").and_then(Value::as_str).unwrap_or("?");
+            lines.push(format!("  {file}::{symbol}"));
+        }
+    }
+}
+
+/// `(rust 214, ts 143)` language breakdown for dead_code; empty for others.
+fn dead_code_language_suffix(section: &Value) -> String {
+    let Some(by_lang) = section.get("by_language").and_then(Value::as_object) else {
+        return String::new();
+    };
+    if by_lang.is_empty() {
+        return String::new();
+    }
+    let mut pairs: Vec<(&String, u64)> = by_lang
+        .iter()
+        .map(|(k, v)| (k, v.as_u64().unwrap_or(0)))
+        .collect();
+    pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    let rendered = pairs
+        .iter()
+        .map(|(lang, n)| format!("{} {n}", short_lang(lang)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(" ({rendered})")
+}
+
+fn short_lang(lang: &str) -> &str {
+    match lang {
+        "typescript" => "ts",
+        "javascript" => "js",
+        "python" => "py",
+        other => other,
+    }
+}
+
+/// Duplicates: `{cost, files: [a, b, ...]}`.
+fn render_group_category(
+    lines: &mut Vec<String>,
+    label: &str,
+    summary: &Map<String, Value>,
+    details: &Map<String, Value>,
+    key: &str,
+) {
+    let Some(section) = summary.get(key) else {
+        return;
+    };
+    if let Some(status) = section.get("status").and_then(Value::as_str) {
+        lines.push(format!("{label}: {status}"));
+        return;
+    }
+    let count = section.get("count").and_then(Value::as_u64).unwrap_or(0);
+    if count == 0 {
+        lines.push(format!("{label}: 0"));
+        return;
+    }
+    lines.push(format!("{label}: {count} (top by cost):"));
+    if let Some(items) = category_items(summary, details, key) {
+        for item in items {
+            let cost = item.get("cost").and_then(Value::as_u64).unwrap_or(0);
+            let files: Vec<&str> = item
+                .get("files")
+                .and_then(Value::as_array)
+                .map(|arr| arr.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            lines.push(format!("  {cost}  {}", files.join(" == ")));
+        }
+    }
+}
+
+fn render_todos(lines: &mut Vec<String>, summary: &Map<String, Value>) {
+    let Some(section) = summary.get("todos") else {
+        return;
+    };
+    let count = section.get("count").and_then(Value::as_u64).unwrap_or(0);
+    if count == 0 {
+        return;
+    }
+    let by_kind = section
+        .get("by_kind")
+        .and_then(Value::as_object)
+        .map(|map| {
+            let mut pairs: Vec<(&String, u64)> = map
+                .iter()
+                .map(|(k, v)| (k, v.as_u64().unwrap_or(0)))
+                .collect();
+            pairs.sort_by(|a, b| a.0.cmp(b.0));
+            pairs
+                .iter()
+                .map(|(kind, n)| format!("{kind} {n}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    if by_kind.is_empty() {
+        lines.push(format!("TODOs: {count}"));
+    } else {
+        lines.push(format!("TODOs: {count} ({by_kind})"));
+    }
+}
+
 fn summary_for(category: InspectCategory, outcome: Option<&JobOutcome>) -> Value {
     let Some(outcome) = outcome else {
         return status_summary("pending");
     };
+    // Stale WITH a cached payload: surface the real last-known counts (the same
+    // numbers the status bar shows with its `~` marker) flagged `stale: true`,
+    // instead of a bare `{status:"stale"}` that throws the counts away and makes
+    // the body disagree with the bar. Staleness is still signaled — by the flag
+    // and the `note:` line. Pending / Failed / stale-without-cache carry no
+    // payload, so they keep the bare status sentinel.
+    if let JobOutcome::Stale {
+        cached: Some(payload),
+        ..
+    } = outcome
+    {
+        let mut summary = computed_summary_for(category, Some(payload));
+        if let Some(obj) = summary.as_object_mut() {
+            obj.insert("stale".to_string(), Value::Bool(true));
+        }
+        return summary;
+    }
     if let Some(status) = outcome.summary_status() {
         return status_summary(status);
     }
@@ -776,5 +1000,189 @@ mod status_bar_refresh_tests {
             ctx.status_bar_counts().is_none(),
             "one real category must not surface a bar with fabricated U0 C0"
         );
+    }
+}
+
+#[cfg(test)]
+mod render_text_tests {
+    use super::*;
+
+    fn summary_map(value: Value) -> Map<String, Value> {
+        value.as_object().cloned().unwrap_or_default()
+    }
+
+    fn render(summary: Value) -> String {
+        render_inspect_text(&summary_map(summary), &Map::new(), &[], &[], &[])
+    }
+
+    #[test]
+    fn renders_populated_categories_highest_signal_first() {
+        let text = render(serde_json::json!({
+            "duplicates": {
+                "count": 2,
+                "top": [
+                    { "cost": 1083, "files": ["a/x.ts:1-9", "b/x.ts:1-9"] },
+                    { "cost": 500, "files": ["a/y.ts:1-3", "b/y.ts:1-3"] },
+                ],
+            },
+            "dead_code": {
+                "count": 357,
+                "by_language": { "rust": 214, "typescript": 143 },
+                "top": [ { "file": "crates/aft/src/x.rs", "symbol": "foo" } ],
+            },
+            "unused_exports": {
+                "count": 1,
+                "top": [ { "file": "packages/aft-bridge/src/log.ts", "symbol": "sessionLog" } ],
+            },
+            "todos": { "count": 8, "by_kind": { "BUG": 2, "TODO": 3 } },
+        }));
+
+        // Order: duplicates → dead_code → unused_exports → todos.
+        let dup = text.find("Duplicates:").expect("duplicates");
+        let dead = text.find("Dead code:").expect("dead code");
+        let unused = text.find("Unused exports:").expect("unused");
+        let todos = text.find("TODOs:").expect("todos");
+        assert!(
+            dup < dead && dead < unused && unused < todos,
+            "wrong order:\n{text}"
+        );
+
+        // Cost-ranked duplicate rows with `==` separator between the file pair.
+        assert!(
+            text.contains("1083  a/x.ts:1-9 == b/x.ts:1-9"),
+            "dup row:\n{text}"
+        );
+        // dead_code language breakdown uses short names, count-desc.
+        assert!(
+            text.contains("Dead code: 357 (rust 214, ts 143):"),
+            "dead head:\n{text}"
+        );
+        assert!(
+            text.contains("  crates/aft/src/x.rs::foo"),
+            "dead row:\n{text}"
+        );
+        assert!(
+            text.contains("  packages/aft-bridge/src/log.ts::sessionLog"),
+            "unused row:\n{text}"
+        );
+        assert!(text.contains("TODOs: 8 (BUG 2, TODO 3)"), "todos:\n{text}");
+
+        // Metrics + scanner_state are NOT in the agent text.
+        assert!(!text.contains("loc"), "metrics leaked into text:\n{text}");
+        assert!(
+            !text.contains("scanner_state"),
+            "scanner_state leaked:\n{text}"
+        );
+        // Diagnostics + status bar are appended by the plugin layer, not here.
+        assert!(
+            !text.contains("diagnostics"),
+            "diagnostics must be plugin-rendered:\n{text}"
+        );
+        assert!(
+            !text.contains("[AFT"),
+            "status bar must be plugin-appended:\n{text}"
+        );
+    }
+
+    #[test]
+    fn zero_counts_render_as_clean_zero() {
+        let text = render(serde_json::json!({
+            "duplicates": { "count": 0 },
+            "dead_code": { "count": 0, "by_language": {} },
+            "unused_exports": { "count": 0 },
+            "todos": { "count": 0 },
+        }));
+        assert!(text.contains("Duplicates: 0"), "{text}");
+        assert!(text.contains("Dead code: 0"), "{text}");
+        assert!(text.contains("Unused exports: 0"), "{text}");
+        // Zero todos are omitted entirely (no noise).
+        assert!(
+            !text.contains("TODOs:"),
+            "zero todos should be omitted:\n{text}"
+        );
+    }
+
+    #[test]
+    fn pending_status_renders_status_not_count() {
+        let text = render(serde_json::json!({
+            "duplicates": { "status": "pending" },
+            "dead_code": { "status": "stale" },
+        }));
+        assert!(text.contains("Duplicates: pending"), "{text}");
+        assert!(text.contains("Dead code: stale"), "{text}");
+    }
+
+    #[test]
+    fn honesty_note_lists_incomplete_categories_only_when_present() {
+        let none = render_inspect_text(&Map::new(), &Map::new(), &[], &[], &[]);
+        assert!(!none.contains("note:"), "no note when all clear:\n{none}");
+
+        let text = render_inspect_text(
+            &summary_map(serde_json::json!({ "duplicates": { "count": 1, "top": [] } })),
+            &Map::new(),
+            &["dead_code".to_string()],
+            &["unused_exports".to_string(), "diagnostics".to_string()],
+            &[serde_json::json!({ "category": "duplicates", "message": "boom" })],
+        );
+        // diagnostics-pending is surfaced by the plugin diagnostics line, not here.
+        assert!(
+            text.contains("note: dead_code stale, unused_exports pending, duplicates failed"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("diagnostics pending"),
+            "diagnostics excluded from note:\n{text}"
+        );
+        // Note comes first.
+        assert!(text.starts_with("note:"), "note must lead:\n{text}");
+    }
+
+    // Regression: a stale outcome WITH a cached payload must surface the real
+    // last-known counts (matching the status bar's `~D…` numbers) rather than a
+    // bare {status:"stale"} that drops them — body and bar must agree.
+    #[test]
+    fn stale_with_cache_summary_keeps_counts_and_flags_stale() {
+        let stale = JobOutcome::Stale {
+            cached: Some(serde_json::json!({ "count": 357, "by_language": { "rust": 214 } })),
+            in_flight: true,
+        };
+        let summary = summary_for(InspectCategory::DeadCode, Some(&stale));
+        assert_eq!(summary.get("count").and_then(Value::as_u64), Some(357));
+        assert_eq!(summary.get("stale").and_then(Value::as_bool), Some(true));
+        // Not the bare sentinel.
+        assert!(
+            summary.get("status").is_none(),
+            "stale-with-cache must not be a status sentinel: {summary}"
+        );
+
+        // And the rendered body shows the count, not "stale".
+        let text = render_inspect_text(
+            &summary_map(serde_json::json!({ "dead_code": summary })),
+            &Map::new(),
+            &["dead_code".to_string()],
+            &[],
+            &[],
+        );
+        assert!(
+            text.contains("Dead code: 357"),
+            "body must show cached count:\n{text}"
+        );
+        assert!(
+            text.contains("note: dead_code stale"),
+            "staleness still flagged:\n{text}"
+        );
+    }
+
+    // Stale WITHOUT a cache (never scanned, just invalidated) keeps the bare
+    // sentinel — there are no real counts to show.
+    #[test]
+    fn stale_without_cache_summary_is_status_sentinel() {
+        let stale = JobOutcome::Stale {
+            cached: None,
+            in_flight: true,
+        };
+        let summary = summary_for(InspectCategory::DeadCode, Some(&stale));
+        assert_eq!(summary.get("status").and_then(Value::as_str), Some("stale"));
+        assert!(summary.get("count").is_none());
     }
 }

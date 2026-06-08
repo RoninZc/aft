@@ -24,12 +24,23 @@ const emitStateBySession = new Map<string, StatusBarEmitState>();
 export function statusBarSuffixForSession(
   sessionID: string,
   counts: StatusBarCounts | undefined,
+  force = false,
 ): string {
   if (!counts) return "";
   let state = emitStateBySession.get(sessionID);
   if (!state) {
     state = createStatusBarEmitState();
     emitStateBySession.set(sessionID, state);
+  }
+  // `force` guarantees the bar on a tool whose whole purpose is the health
+  // glance (aft_inspect): the bar IS that call's summary line, so it must show
+  // even when counts are unchanged since the last emit. Still record it as the
+  // latest emit + reset the heartbeat so the emit-on-change cadence continues
+  // correctly afterward.
+  if (force) {
+    state.last = counts;
+    state.callsSinceEmit = 0;
+    return statusBarLine(counts);
   }
   return shouldEmitStatusBar(state, counts) ? statusBarLine(counts) : "";
 }

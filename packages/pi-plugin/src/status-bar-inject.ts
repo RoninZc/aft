@@ -31,6 +31,7 @@ const emitStateBySession = new Map<string, StatusBarEmitState>();
 export function statusBarBlockForSession(
   sessionID: string | undefined,
   counts: StatusBarCounts | undefined,
+  force = false,
 ): string | undefined {
   if (!counts) return undefined;
   const key = sessionID ?? DEFAULT_SESSION;
@@ -38,6 +39,14 @@ export function statusBarBlockForSession(
   if (!state) {
     state = createStatusBarEmitState();
     emitStateBySession.set(key, state);
+  }
+  // `force` guarantees the bar on aft_inspect — the bar IS that call's summary
+  // line, so it must show even when counts are unchanged. Record it as the
+  // latest emit + reset the heartbeat so the cadence continues correctly after.
+  if (force) {
+    state.last = counts;
+    state.callsSinceEmit = 0;
+    return formatStatusBar(counts);
   }
   return shouldEmitStatusBar(state, counts) ? formatStatusBar(counts) : undefined;
 }

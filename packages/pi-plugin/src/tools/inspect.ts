@@ -395,10 +395,18 @@ export function registerInspectTool(pi: ExtensionAPI, ctx: PluginContext): void 
       const topK = validateOptionalTopK(params.topK);
       const response = await callBridge(bridge, "inspect", { sections, scope, topK }, extCtx);
       runPendingTier2Categories(bridge, tier2RefreshCategories(response), extCtx);
-      return textResult(
-        (response.text as string | undefined) ?? JSON.stringify(response, null, 2),
-        response,
-      );
+      const body = response.text as string | undefined;
+      if (typeof body === "string") {
+        // Rust builds the compact body (duplicates/dead_code/unused_exports/
+        // todos). The diagnostics line is rendered plugin-side (it owns the
+        // partial/pending honesty logic) and appended after the body, matching
+        // the OpenCode `appendRenderedDiagnostics` flow. The status bar is added
+        // by the global tool_result hook.
+        const diagnostics = diagnosticsSummaryPart(asRecord(response.summary));
+        const text = diagnostics ? (body ? `${body}\n\n${diagnostics}` : diagnostics) : body;
+        return textResult(text, response);
+      }
+      return textResult(JSON.stringify(response, null, 2), response);
     },
     renderCall(args, theme, context) {
       return renderInspectCall(args, theme, context);

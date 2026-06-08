@@ -1075,9 +1075,15 @@ async function initializePluginForDirectory(input: Parameters<Plugin>[0]) {
       );
       // Agent status bar — IDE-style health glance, appended on emit-on-change.
       // Read from the active bridge (no spawn); the Rust side keeps counts current.
+      // Force it on aft_inspect: the bar IS that call's summary line, so it must
+      // always show even if counts are unchanged since the last emit.
       if (output.output !== undefined) {
         const activeBridge = ctx.pool.getActiveBridgeForRoot(sessionDir);
-        const suffix = statusBarSuffixForSession(toolInput.sessionID, activeBridge?.getStatusBar());
+        const suffix = statusBarSuffixForSession(
+          toolInput.sessionID,
+          activeBridge?.getStatusBar(),
+          toolInput.tool === "aft_inspect",
+        );
         if (suffix) output.output += suffix;
       }
     },

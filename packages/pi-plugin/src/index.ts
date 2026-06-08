@@ -825,8 +825,16 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     let content = bgContent ?? event.content;
     // Agent status bar — IDE-style health glance, appended on emit-on-change.
     // Read from the active bridge (no spawn); the Rust side keeps counts current.
+    // Force it on aft_inspect (the bar IS that call's summary line). The Pi
+    // tool_result event doesn't carry the tool name, so detect inspect by its
+    // distinctive top-level `scanner_state` key on the response (passed as
+    // `details`) — only inspect emits it.
+    const isInspect =
+      typeof event.details === "object" &&
+      event.details !== null &&
+      "scanner_state" in (event.details as Record<string, unknown>);
     const activeBridge = pool.getActiveBridgeForRoot(extCtx.cwd);
-    const bar = statusBarBlockForSession(sessionID, activeBridge?.getStatusBar());
+    const bar = statusBarBlockForSession(sessionID, activeBridge?.getStatusBar(), isInspect);
     if (bar) content = [...content, { type: "text", text: bar }];
     // Nothing to add → leave the tool result untouched.
     if (content === event.content) return undefined;

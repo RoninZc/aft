@@ -178,6 +178,26 @@ describe("aft_inspect tool", () => {
     expect(partial).toContain("oxlint");
   });
 
+  test("returns the Rust text body with diagnostics appended (no JSON dump)", async () => {
+    const { tools } = createInspectHarness(() => ({
+      success: true,
+      text: "Duplicates: 2 (top by cost):\n  1083  a.ts == b.ts\nDead code: 1 (rust 1):\n  x.rs::foo",
+      summary: { diagnostics: { errors: 1, warnings: 0, info: 0, hints: 2 } },
+    }));
+
+    const result = await tools.aft_inspect.execute({}, createMockSdkContext("/repo"));
+    const text = typeof result === "string" ? result : (result.output as string);
+
+    // Rust body is surfaced verbatim …
+    expect(text).toContain("Duplicates: 2 (top by cost):");
+    expect(text).toContain("  x.rs::foo");
+    // … with the diagnostics line appended after it …
+    expect(text).toContain("diagnostics: 1 errors, 0 warnings, 0 info, 2 hints");
+    // … and never the raw JSON fallback.
+    expect(text).not.toContain('"success"');
+    expect(text).not.toContain("scanner_state");
+  });
+
   test("registration gate follows surface, disabled_tools, and inspect.enabled", () => {
     expect(shouldRegisterInspectTool({ tool_surface: "recommended" })).toBe(true);
     expect(shouldRegisterInspectTool({ tool_surface: "all" })).toBe(true);

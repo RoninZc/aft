@@ -192,6 +192,30 @@ describe("Pi aft_inspect adapter", () => {
     });
   });
 
+  test("returns the Rust text body with diagnostics appended (no JSON dump)", async () => {
+    const { api, tools } = makeMockApi();
+    const { bridge } = makeMockBridge(() => ({
+      success: true,
+      text: "Duplicates: 2 (top by cost):\n  1083  a.ts == b.ts\nDead code: 1 (rust 1):\n  x.rs::foo",
+      summary: { diagnostics: { errors: 1, warnings: 0, info: 0, hints: 2 } },
+    }));
+    registerInspectTool(api, makePluginContext(bridge));
+
+    const result = (await executeTool(
+      tools.get("aft_inspect")!,
+      {},
+      makeExtContext("/repo", "pi-session"),
+    )) as { content: Array<{ type: string; text: string }> };
+    const text = result.content[0]?.text ?? "";
+
+    // Rust body verbatim, diagnostics appended after it, no JSON fallback.
+    expect(text).toContain("Duplicates: 2 (top by cost):");
+    expect(text).toContain("  x.rs::foo");
+    expect(text).toContain("diagnostics 1 errors/0 warnings/0 info/2 hints");
+    expect(text).not.toContain('"success"');
+    expect(text).not.toContain("scanner_state");
+  });
+
   test("second inspect call can read cached Tier 2 data after the trigger starts", async () => {
     const { api, tools } = makeMockApi();
     let tier2RunStarted = false;
