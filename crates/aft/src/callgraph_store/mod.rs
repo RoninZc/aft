@@ -740,6 +740,20 @@ impl CallGraphStore {
         tx.commit()?;
         phase!("sqlite_insert", t);
 
+        let elapsed_ms = started.elapsed().as_millis();
+        // Always-on perf line (the AFT_BENCH_COLD eprintln path is stderr-only and
+        // bleeds into the TUI, so it can't run in production). The persisted-store
+        // cold build is a full parallel parse of the project — log it so a
+        // background CPU burst from a store rebuild is attributable in the log.
+        crate::slog_info!(
+            "perf callgraph_store cold_build: files={} nodes={} refs={} edges={} ms={}",
+            extracts.len(),
+            node_count,
+            ref_count,
+            edge_count + supplemental_edge_count,
+            elapsed_ms
+        );
+
         Ok(ColdBuildStats {
             files: extracts.len(),
             nodes: node_count,
@@ -749,7 +763,7 @@ impl CallGraphStore {
                 .into_iter()
                 .map(|failure| failure.rel_path)
                 .collect(),
-            elapsed_ms: started.elapsed().as_millis(),
+            elapsed_ms,
         })
     }
 

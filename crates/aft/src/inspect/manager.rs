@@ -592,6 +592,11 @@ impl InspectManager {
         };
         if let Ok(Some(success)) = self.tier2_quick_reuse_success(&job, cache.as_ref()) {
             let result = InspectResult::success(&job, success, started.elapsed());
+            crate::slog_debug!(
+                "perf tier2 category={} reuse=hit ms={}",
+                job.category,
+                started.elapsed().as_millis()
+            );
             log_tier2_benchmark_category_end(&result);
             return result;
         }
@@ -600,6 +605,14 @@ impl InspectManager {
             Ok(success) => InspectResult::success(&job, success, started.elapsed()),
             Err(message) => InspectResult::failed(&job, message, started.elapsed()),
         };
+        // Always-on perf line: a full (reuse=miss) scan is the expensive path —
+        // for dead_code it includes the callgraph snapshot rebuild. ms here lets
+        // us attribute background CPU bursts to a specific category from the log.
+        crate::slog_info!(
+            "perf tier2 category={} reuse=miss ms={}",
+            job.category,
+            started.elapsed().as_millis()
+        );
         log_tier2_benchmark_category_end(&result);
         result
     }
@@ -1193,6 +1206,12 @@ fn build_tier2_callgraph_snapshot(
             graph_files.len()
         );
     }
+    // Canonicalize each file ONCE (std::fs::canonicalize is a realpath syscall —
+    // disk I/O per call, slow on large repos / Windows). Previously this ran
+    // twice per file: once to build `files` and again as `snapshot_file` inside
+    // the loop, i.e. 2*N syscalls. Compute once here and reuse via zip below so
+    // it is N syscalls. (Behavior identical — same canonical value; we are NOT
+    // changing WHETHER we canonicalize, only removing the redundant call.)
     let files = graph_files
         .iter()
         .map(canonicalize_for_snapshot)
@@ -1204,9 +1223,8 @@ fn build_tier2_callgraph_snapshot(
     let mut entry_points = BTreeSet::new();
     let mut built_files = 0usize;
 
-    for file in &graph_files {
-        let snapshot_file = canonicalize_for_snapshot(file);
-        if is_entry_point_file(&resolved_entry_points, &snapshot_file) {
+    for (file, snapshot_file) in graph_files.iter().zip(files.iter()) {
+        if is_entry_point_file(&resolved_entry_points, snapshot_file) {
             entry_points.insert(snapshot_file.clone());
         }
 
@@ -1288,17 +1306,20 @@ fn build_tier2_callgraph_snapshot(
         }
     }
 
-    if tier2_benchmark_logging_enabled() {
-        crate::slog_info!(
-            "settle bench: tier2_callgraph_snapshot_end files={} built_files={} exported_symbols={} outbound_calls={} entry_points={} ms={}",
-            graph_files.len(),
-            built_files,
-            exported_symbols.len(),
-            outbound_calls.len(),
-            entry_points.len(),
-            started.elapsed().as_millis()
-        );
-    }
+    // Always-on perf line: this full from-scratch parse of every project file is
+    // the multi-core CPU spike behind tier2 dead_code (it does NOT yet reuse the
+    // persisted incremental CallgraphStore). Logged unconditionally (only fires
+    // when a snapshot actually builds, so it is not per-request spam) so we can
+    // attribute background CPU bursts from the live log.
+    crate::slog_info!(
+        "perf tier2_callgraph_snapshot: files={} built={} exports={} edges={} entry_points={} ms={}",
+        graph_files.len(),
+        built_files,
+        exported_symbols.len(),
+        outbound_calls.len(),
+        entry_points.len(),
+        started.elapsed().as_millis()
+    );
 
     Some(Arc::new(CallgraphSnapshot {
         generated_at: Some(SystemTime::now()),
