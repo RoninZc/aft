@@ -8,7 +8,7 @@ use crossbeam_channel::{after, bounded, select, Receiver, Sender};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::cache::{canonical_project_root, InspectCache, Tier2ContributionUpdates};
+use super::cache::{InspectCache, Tier2ContributionUpdates};
 use super::dispatch::{default_worker, start_dispatch_loop, InspectWorker};
 use super::freshness::ContributionFreshness;
 use super::job::{
@@ -349,7 +349,6 @@ impl InspectManager {
         inspect_dir: PathBuf,
         project_root: PathBuf,
     ) -> Result<Arc<InspectCache>, String> {
-        let project_root = canonical_project_root(&project_root);
         let project_key = crate::search_index::project_cache_key(&project_root);
         let sqlite_path = inspect_dir.join(format!("{project_key}.sqlite"));
         let identity = InspectCacheIdentity {
