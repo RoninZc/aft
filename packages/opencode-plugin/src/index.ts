@@ -696,11 +696,13 @@ async function initializePluginForDirectory(input: Parameters<Plugin>[0]) {
     // confirms the polled session really lives in that directory, and never
     // attempt the fallback for placeholder/empty session ids.
     let bridge = pool.getActiveBridgeForRoot(input.directory);
+    let servedDirectory = input.directory;
     const realSessionID = (params.sessionID as string) || "";
     if (!bridge && realSessionID) {
       const verifiedDir = await verifySessionDirectory(input.client, realSessionID);
       if (verifiedDir && verifiedDir !== input.directory) {
         bridge = pool.getActiveBridgeForRoot(verifiedDir);
+        servedDirectory = verifiedDir;
       }
     }
     if (!bridge) {
@@ -718,19 +720,27 @@ async function initializePluginForDirectory(input: Parameters<Plugin>[0]) {
     // would mis-attribute another session's per-session slice — most visibly
     // showing `Session: 0 events` in the sidebar even when this session has
     // many compression events. Only serve the cache when its session matches.
+    // `served_directory` is the cross-project provenance marker: it names the
+    // project this server DELIBERATELY resolved for the caller (its own cwd,
+    // or an SDK-verified resume directory). Clients reject mismatched-root
+    // snapshots that lack a matching marker — that's what distinguishes a
+    // legit resume serve from a stray multi-project-host response (old
+    // servers, which could serve another project's bridge via the poisoned
+    // session-dir cache, never set this field). Do NOT derive it from echoed
+    // request params or the snapshot body.
     const cached = bridge.getCachedStatus();
     const cachedSessionId = (cached as Record<string, unknown> | null)?.session as
       | Record<string, unknown>
       | undefined;
     const cachedId = cachedSessionId?.id as string | undefined;
     if (cached !== null && cachedId === sessionID) {
-      return { success: true, ...cached };
+      return { success: true, ...cached, served_directory: servedDirectory };
     }
     const response = await bridge.send("status", { session_id: sessionID });
     if (response.success !== false) {
       bridge.cacheStatusSnapshot(response);
     }
-    return response;
+    return { ...response, served_directory: servedDirectory };
   });
   // Feature announcement — TUI plugin calls this on startup to show a dialog.
   // Uses ANNOUNCEMENT_VERSION (not PLUGIN_VERSION) so patch releases don't re-fire.

@@ -234,36 +234,58 @@ describe("isSnapshotForContext (cross-project contamination belt)", () => {
     }) as any;
 
   test("accepts a snapshot whose project_root matches the sidebar directory", () => {
-    expect(isSnapshotForContext(snap(), "/work/aft", "ses_a")).toBe(true);
+    expect(isSnapshotForContext(snap(), "/work/aft", undefined)).toBe(true);
     // trailing slash tolerance
-    expect(isSnapshotForContext(snap(), "/work/aft/", "ses_a")).toBe(true);
+    expect(isSnapshotForContext(snap(), "/work/aft/", undefined)).toBe(true);
   });
 
   test("accepts via canonical_root when project_root differs (symlink aliasing)", () => {
     const s = snap({ project_root: "/private/work/aft", canonical_root: "/work/aft" });
-    expect(isSnapshotForContext(s, "/work/aft", "ses_a")).toBe(true);
+    expect(isSnapshotForContext(s, "/work/aft", undefined)).toBe(true);
   });
 
   test("REJECTS another project's snapshot (the magic-context contamination case)", () => {
     const stray = snap({
       project_root: "/work/magic-context",
       canonical_root: "/work/magic-context",
-      session: { id: "ses_other", tracked_files: 0, checkpoints: 0 },
     });
-    expect(isSnapshotForContext(stray, "/work/aft", "ses_a")).toBe(false);
+    expect(isSnapshotForContext(stray, "/work/aft", undefined)).toBe(false);
   });
 
-  test("accepts a mismatched root when the snapshot was computed for OUR session (opencode -s resume)", () => {
+  test("REGRESSION: a stray snapshot echoing OUR session id is still rejected", () => {
+    // Rust echoes the REQUESTED session id into snapshot.session.id, so a
+    // snapshot computed against another project's bridge carries our id. The
+    // belt's first version accepted that as a "resume case" — making it
+    // vacuous (contamination recurred live). Session identity must never
+    // grant cross-project acceptance.
+    const stray = snap({
+      project_root: "/work/magic-context",
+      canonical_root: "/work/magic-context",
+      session: { id: "ses_a", tracked_files: 0, checkpoints: 0 }, // our id, echoed
+    });
+    expect(isSnapshotForContext(stray, "/work/aft", undefined)).toBe(false);
+  });
+
+  test("accepts a mismatched root when the handler attached a matching served_directory (opencode -s resume)", () => {
     const resume = snap({
       project_root: "/real/project/elsewhere",
       canonical_root: "/real/project/elsewhere",
-      session: { id: "ses_a", tracked_files: 1, checkpoints: 2 },
     });
-    expect(isSnapshotForContext(resume, "/launch/cwd", "ses_a")).toBe(true);
+    expect(isSnapshotForContext(resume, "/launch/cwd", "/real/project/elsewhere")).toBe(true);
+  });
+
+  test("REJECTS a mismatched root when served_directory names a different project", () => {
+    // A stray server attaching its own (other-project) served_directory must
+    // not be accepted just because the field is present.
+    const stray = snap({
+      project_root: "/work/magic-context",
+      canonical_root: "/work/magic-context",
+    });
+    expect(isSnapshotForContext(stray, "/work/aft", "/work/aft")).toBe(false);
   });
 
   test("accepts placeholder/synthetic snapshots with no roots", () => {
     const placeholder = snap({ project_root: null, canonical_root: null });
-    expect(isSnapshotForContext(placeholder, "/work/aft", "ses_a")).toBe(true);
+    expect(isSnapshotForContext(placeholder, "/work/aft", undefined)).toBe(true);
   });
 });
