@@ -400,8 +400,10 @@ mod tests {
         assert!(capped.text.starts_with("FIRST-ERROR-CONTEXT"));
         assert!(capped.text.ends_with("Traceback: ModuleNotFoundError"));
         // Failure budget is larger than success budget but far below the old 4 KiB.
-        assert!(COMPLETION_FAILURE_PREVIEW_BYTES > COMPLETION_SUCCESS_PREVIEW_BYTES);
-        assert!(COMPLETION_FAILURE_PREVIEW_BYTES < 4 * 1024);
+        const {
+            assert!(COMPLETION_FAILURE_PREVIEW_BYTES > COMPLETION_SUCCESS_PREVIEW_BYTES);
+            assert!(COMPLETION_FAILURE_PREVIEW_BYTES < 4 * 1024);
+        }
     }
 
     #[test]
