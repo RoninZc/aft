@@ -117,3 +117,47 @@ describe("BinaryBridge background task accounting", () => {
     expect(bridge.hasOutstandingBackgroundTasks()).toBe(false);
   });
 });
+
+describe("BinaryBridge background task accounting on bridge death", () => {
+  function deathInternals(bridge: BinaryBridge): {
+    handleTimeout(triggeringSessionId?: string): void;
+    handleCrash(cause?: Error): void;
+    rejectAllPending(error: Error): void;
+  } {
+    return bridge as unknown as {
+      handleTimeout(triggeringSessionId?: string): void;
+      handleCrash(cause?: Error): void;
+      rejectAllPending(error: Error): void;
+    };
+  }
+
+  test("crash clears outstanding task ids so the bridge does not stay pinned forever", () => {
+    // Council finding (unanimous, v0.36.2 RC audit): a crash abandons every
+    // removal hook (foreground polls rejected, no completion frame from a
+    // dead child). Without clearing, the phantom ids pin the bridge against
+    // idle eviction permanently — defeating the #7 feature.
+    const bridge = new BinaryBridge("/bin/false", { autoRestart: false });
+    deliverResponse(bridge, "bash", {
+      success: true,
+      task_id: "bash-crash1",
+      status: "running",
+    });
+    expect(bridge.hasOutstandingBackgroundTasks()).toBe(true);
+
+    deathInternals(bridge).handleCrash(new Error("boom"));
+    expect(bridge.hasOutstandingBackgroundTasks()).toBe(false);
+  });
+
+  test("timeout kill clears outstanding task ids", () => {
+    const bridge = new BinaryBridge("/bin/false", { autoRestart: false });
+    deliverResponse(bridge, "bash", {
+      success: true,
+      task_id: "bash-timeout1",
+      status: "running",
+    });
+    expect(bridge.hasOutstandingBackgroundTasks()).toBe(true);
+
+    deathInternals(bridge).handleTimeout();
+    expect(bridge.hasOutstandingBackgroundTasks()).toBe(false);
+  });
+});

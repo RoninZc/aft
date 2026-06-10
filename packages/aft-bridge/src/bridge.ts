@@ -1312,6 +1312,13 @@ export class BinaryBridge {
     this.rejectAllPending(
       new Error(`${this.errorPrefix} bridge killed during sibling timeout — request aborted`),
     );
+    // Forget outstanding background task ids: their removal hooks died with
+    // the child (foreground polls were just rejected and won't resume, and a
+    // completion frame can't arrive from a killed process), so keeping them
+    // would pin this bridge against idle eviction forever. Safe to forget —
+    // detached tasks persist undelivered completions on disk, and the next
+    // spawn rehydrates and delivers them.
+    this.outstandingBackgroundTaskIds.clear();
     if (this.process) {
       this.process.kill("SIGKILL");
       this.process = null;
@@ -1349,6 +1356,11 @@ export class BinaryBridge {
     }
     this.clearRestartResetTimer();
     this.configured = false; // Force reconfigure on next command after restart
+    // Forget outstanding background task ids — same rationale as
+    // handleTimeout: abandoned removal hooks would otherwise pin this bridge
+    // against idle eviction permanently (phantom ids). Disk-persisted
+    // completions are re-delivered after the next spawn rehydrates.
+    this.outstandingBackgroundTaskIds.clear();
 
     // Capture the tail BEFORE spawning the replacement, because the next spawn
     // clears the ring. The tail goes to the plugin log only — it's operator
