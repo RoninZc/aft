@@ -68,8 +68,6 @@ describe("BinaryBridge stdout framing", () => {
 
     (bridge as any).onStdoutData(`${trailing.slice(17)}\n`);
     expect(completions).toHaveLength(5_001);
-    expect((completions[completions.length - 1] as { task_id?: string }).task_id).toBe(
-      "task-tail",
-    );
+    expect((completions[completions.length - 1] as { task_id?: string }).task_id).toBe("task-tail");
   });
 });
