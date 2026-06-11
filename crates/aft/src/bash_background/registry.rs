@@ -3610,13 +3610,31 @@ fn terminal_metadata_from_marker(
 }
 
 #[cfg(unix)]
-fn detached_shell_command(command: &str, exit_path: &Path) -> Command {
+fn write_unix_command_script(command: &str, paths: &TaskPaths) -> Result<PathBuf, String> {
+    let stem = paths
+        .json
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("wrapper");
+    let script_path = paths.dir.join(format!("{stem}.sh"));
+    fs::write(&script_path, command)
+        .map_err(|e| format!("failed to write background bash command script: {e}"))?;
+    Ok(script_path)
+}
+
+#[cfg(unix)]
+fn detached_shell_command(command_script: &Path, exit_path: &Path) -> Command {
     let shell = resolve_posix_shell();
     let mut cmd = Command::new(&shell);
+    // Keep the user-provided command body out of argv and shell `-c` parsing.
+    // The direct child is still a tiny wrapper so it can write the authoritative
+    // exit marker after the command script exits (including if that script calls
+    // `exit`). Passing only file paths through `-c` avoids newline/quote/length
+    // edge cases where a multi-command script can be mangled before execution.
     cmd.arg("-c")
-        .arg("\"$0\" -c \"$1\"; code=$?; printf \"%s\" \"$code\" > \"$2.tmp.$$\"; mv -f \"$2.tmp.$$\" \"$2\"")
+        .arg(r#""$0" "$1"; code=$?; printf "%s" "$code" > "$2.tmp.$$"; mv -f "$2.tmp.$$" "$2""#)
         .arg(&shell)
-        .arg(command)
+        .arg(command_script)
         .arg(exit_path);
     unsafe {
         cmd.pre_exec(|| {
@@ -3755,7 +3773,8 @@ fn spawn_detached_child(
             .map_err(|e| format!("failed to open stdout capture file: {e}"))?;
         let stderr = create_capture_file(&paths.stderr)
             .map_err(|e| format!("failed to open stderr capture file: {e}"))?;
-        detached_shell_command(command, &paths.exit)
+        let command_script = write_unix_command_script(command, paths)?;
+        detached_shell_command(&command_script, &paths.exit)
             .current_dir(workdir)
             .envs(env)
             .stdin(Stdio::null())
@@ -3975,6 +3994,106 @@ mod tests {
             .expect("insert terminal pty task");
         let task = registry.task_for_session(&task_id, "session").unwrap();
         (task_id, task)
+    }
+
+    #[cfg(unix)]
+    fn wait_for_terminal_snapshot(
+        registry: &BgTaskRegistry,
+        task_id: &str,
+        session_id: &str,
+        project: &Path,
+        storage: &Path,
+    ) -> BgTaskSnapshot {
+        let started = Instant::now();
+        loop {
+            let snapshot = registry
+                .status(task_id, session_id, Some(project), Some(storage), 4096)
+                .expect("spawned task should be visible to status");
+            if snapshot.info.status.is_terminal() {
+                return snapshot;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "timed out waiting for task {task_id} to finish; last status={:?}",
+                snapshot.info.status
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn multiline_pipeline_stdout_persists_all_lines_after_terminal_status() {
+        let cases = [
+            (
+                "long-first",
+                "sleep 0.5; printf 'one\\n' | cat\nprintf 'two\\n' | grep -c two\nprintf 'three\\n' | cat",
+                vec!["one", "1", "three"],
+            ),
+            (
+                "short-first",
+                "printf 'one\\n' | cat\nsleep 0.2; printf 'two\\n' | grep -c two\nprintf 'three\\n' | cat",
+                vec!["one", "1", "three"],
+            ),
+            (
+                "failing-middle",
+                "sleep 0.2; printf 'one\\n' | cat\nfalse; printf 'after-false\\n' | cat\nprintf 'three\\n' | cat",
+                vec!["one", "after-false", "three"],
+            ),
+        ];
+
+        for (name, command, expected_lines) in cases {
+            let registry = BgTaskRegistry::new(Arc::new(Mutex::new(None)));
+            let dir = tempfile::tempdir().unwrap();
+            let session_id = format!("session-{name}");
+            let task_id = registry
+                .spawn(
+                    command,
+                    session_id.clone(),
+                    dir.path().to_path_buf(),
+                    HashMap::new(),
+                    Some(Duration::from_secs(30)),
+                    dir.path().to_path_buf(),
+                    10,
+                    true,
+                    true,
+                    Some(dir.path().to_path_buf()),
+                )
+                .unwrap();
+
+            let snapshot = wait_for_terminal_snapshot(
+                &registry,
+                &task_id,
+                &session_id,
+                dir.path(),
+                dir.path(),
+            );
+            assert_eq!(
+                snapshot.info.status,
+                BgTaskStatus::Completed,
+                "{name}: task should complete; snapshot={snapshot:?}"
+            );
+            assert_eq!(
+                snapshot.exit_code,
+                Some(0),
+                "{name}: script should use the final command's exit code"
+            );
+
+            let stdout_path = task_paths(dir.path(), &session_id, &task_id).stdout;
+            let stdout = fs::read_to_string(&stdout_path).unwrap_or_else(|error| {
+                panic!(
+                    "{name}: failed to read raw stdout file {}: {error}",
+                    stdout_path.display()
+                )
+            });
+            let lines: Vec<&str> = stdout.lines().collect();
+            assert_eq!(
+                lines,
+                expected_lines,
+                "{name}: raw stdout file must include every newline-separated command's output; stdout_path={}",
+                stdout_path.display()
+            );
+        }
     }
 
     #[test]
