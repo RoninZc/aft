@@ -60,6 +60,28 @@ export async function runCleanups(reason: string): Promise<void> {
   }
 }
 
+/** Conventional exit codes for fatal signals (128 + signal number). */
+export const SIGNAL_EXIT_CODES = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 } as const;
+
+/** Cap on cleanup time once WE own process termination for a signal. */
+const SIGNAL_CLEANUP_TIMEOUT_MS = 5_000;
+
+/**
+ * Decide whether AFT's handler must terminate the process after cleanup.
+ *
+ * Registering ANY listener for SIGINT/SIGTERM/SIGHUP disables Node/Bun's
+ * default terminate-on-signal behavior. If AFT's listener is the only one,
+ * the default was suppressed solely by us, so we must exit or the host hangs
+ * forever (OpenCode serve + Desktop /event SSE hung on Ctrl-C until SIGKILL).
+ * If the host or another plugin also listens, terminating is THEIR call —
+ * forcing an exit here would race a host's graceful shutdown.
+ */
+export function shouldForceExit(otherListenerCount: number): boolean {
+  return otherListenerCount === 0;
+}
+
+let signalShutdownStarted = false;
+
 function installProcessHandlers(): void {
   const state = getState();
   if (state.installed) return;
@@ -67,13 +89,29 @@ function installProcessHandlers(): void {
 
   const signals = ["SIGTERM", "SIGINT", "SIGHUP"] as const;
   for (const sig of signals) {
-    process.on(sig, () => {
-      // Best-effort async cleanup. We can't fully await in a signal handler
-      // before the default action, but triggering the cleanup gives pending
-      // bridges a chance to send SIGTERM to their children cleanly before the
-      // process group dies. The `exit` handler below covers the final sync kill.
-      void runCleanups(sig);
-    });
+    const handler = () => {
+      // Count listeners other than ours at SIGNAL time (the host may have
+      // registered after plugin load). See shouldForceExit.
+      const others = process.listenerCount(sig) - 1;
+      if (!shouldForceExit(others)) {
+        // Host owns termination; run best-effort cleanup alongside it.
+        void runCleanups(sig);
+        return;
+      }
+      if (signalShutdownStarted) {
+        // Second signal while cleanup is in flight: exit immediately.
+        process.exit(SIGNAL_EXIT_CODES[sig]);
+      }
+      signalShutdownStarted = true;
+      const timeout = new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, SIGNAL_CLEANUP_TIMEOUT_MS);
+        (t as { unref?: () => void }).unref?.();
+      });
+      void Promise.race([runCleanups(sig), timeout]).finally(() => {
+        process.exit(SIGNAL_EXIT_CODES[sig]);
+      });
+    };
+    process.on(sig, handler);
   }
 
   // `beforeExit` fires when the event loop empties without a pending exit.
