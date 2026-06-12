@@ -1222,6 +1222,222 @@ fn app_context_demand_builds_once_and_worktree_reads_readonly() {
 }
 
 #[test]
+fn store_re_roots_relative_metadata_after_project_move() {
+    let dir = tempdir().unwrap();
+    let root_a = dir.path().join("root-a");
+    fs::create_dir_all(&root_a).unwrap();
+    write_file(
+        &root_a.join("main.ts"),
+        "export function entry() { leaf(); }\nfunction leaf() {}\n",
+    );
+    let root_a = fs::canonicalize(&root_a).unwrap_or(root_a);
+    let store_dir = dir.path().join("store");
+    let (store, _) = CallGraphStore::cold_build_with_lease(
+        store_dir.clone(),
+        root_a.clone(),
+        &project_files(&root_a),
+    )
+    .unwrap();
+    let source_sqlite = store.sqlite_path().to_path_buf();
+    drop(store);
+
+    let root_b_raw = dir.path().join("root-b");
+    fs::rename(&root_a, &root_b_raw).unwrap();
+    let root_b = fs::canonicalize(&root_b_raw).unwrap_or(root_b_raw);
+    let moved_sqlite = copy_sqlite_file_set_to_legacy_root(&source_sqlite, &store_dir, &root_b);
+    assert_eq!(
+        backend_workspace_roots(&moved_sqlite),
+        vec![root_a.display().to_string()]
+    );
+
+    let reopened = CallGraphStore::open(store_dir, root_b.clone()).unwrap();
+    assert_eq!(
+        backend_workspace_roots(reopened.sqlite_path()),
+        vec![root_b.display().to_string()]
+    );
+    let snapshot = project_dead_code_snapshot(reopened.sqlite_path()).unwrap();
+    assert!(
+        snapshot
+            .files
+            .contains(&fs::canonicalize(root_b.join("main.ts")).unwrap()),
+        "projection should serve paths under moved root: {:#?}",
+        snapshot.files
+    );
+}
+
+#[test]
+fn store_recovers_dual_root_poisoned_metadata_after_project_move() {
+    let dir = tempdir().unwrap();
+    let root_a = dir.path().join("root-a");
+    fs::create_dir_all(&root_a).unwrap();
+    write_file(
+        &root_a.join("main.ts"),
+        "export function entry() { leaf(); }\nfunction leaf() {}\n",
+    );
+    let root_a = fs::canonicalize(&root_a).unwrap_or(root_a);
+    let store_dir = dir.path().join("store");
+    let (store, _) = CallGraphStore::cold_build_with_lease(
+        store_dir.clone(),
+        root_a.clone(),
+        &project_files(&root_a),
+    )
+    .unwrap();
+    let source_sqlite = store.sqlite_path().to_path_buf();
+    drop(store);
+
+    let root_b_raw = dir.path().join("root-b");
+    fs::rename(&root_a, &root_b_raw).unwrap();
+    let root_b = fs::canonicalize(&root_b_raw).unwrap_or(root_b_raw);
+    let moved_sqlite = copy_sqlite_file_set_to_legacy_root(&source_sqlite, &store_dir, &root_b);
+    duplicate_backend_workspace_root(&moved_sqlite, &root_b);
+    assert_eq!(
+        backend_workspace_roots(&moved_sqlite),
+        vec![root_a.display().to_string(), root_b.display().to_string()]
+    );
+
+    let reopened = CallGraphStore::open(store_dir, root_b.clone()).unwrap();
+    assert_eq!(
+        backend_workspace_roots(reopened.sqlite_path()),
+        vec![root_b.display().to_string()]
+    );
+    let snapshot = project_dead_code_snapshot(reopened.sqlite_path()).unwrap();
+    assert!(snapshot
+        .exported_symbols
+        .iter()
+        .any(|symbol| symbol.symbol == "entry"));
+}
+
+#[test]
+fn store_cold_rebuilds_when_moved_database_has_absolute_data_paths() {
+    let dir = tempdir().unwrap();
+    let root_a = dir.path().join("root-a");
+    fs::create_dir_all(&root_a).unwrap();
+    write_file(
+        &root_a.join("main.ts"),
+        "export function entry() { leaf(); }\nfunction leaf() {}\n",
+    );
+    let root_a = fs::canonicalize(&root_a).unwrap_or(root_a);
+    let store_dir = dir.path().join("store");
+    let (store, _) = CallGraphStore::cold_build_with_lease(
+        store_dir.clone(),
+        root_a.clone(),
+        &project_files(&root_a),
+    )
+    .unwrap();
+    let source_sqlite = store.sqlite_path().to_path_buf();
+    drop(store);
+
+    let root_b_raw = dir.path().join("root-b");
+    fs::rename(&root_a, &root_b_raw).unwrap();
+    let root_b = fs::canonicalize(&root_b_raw).unwrap_or(root_b_raw);
+    let moved_sqlite = copy_sqlite_file_set_to_legacy_root(&source_sqlite, &store_dir, &root_b);
+    poison_files_path_with_absolute_root(&moved_sqlite, &root_a.join("main.ts"));
+
+    let reopened = CallGraphStore::open(store_dir, root_b.clone()).unwrap();
+    assert_ne!(
+        reopened.sqlite_path(),
+        moved_sqlite.as_path(),
+        "absolute data rows should publish a fresh generation instead of serving the copied DB"
+    );
+    assert_eq!(
+        backend_workspace_roots(reopened.sqlite_path()),
+        vec![root_b.display().to_string()]
+    );
+    assert!(!store_has_absolute_data_paths(reopened.sqlite_path()));
+    let tree = reopened
+        .call_tree(Path::new("main.ts"), "entry", 1)
+        .unwrap();
+    assert_eq!(tree.children[0].name, "leaf");
+}
+
+#[test]
+fn read_only_open_does_not_re_root_moved_store_for_worktree_bridge() {
+    let dir = tempdir().unwrap();
+    let root_a = dir.path().join("main-checkout");
+    let root_b = dir.path().join("bridge-worktree");
+    fs::create_dir_all(&root_a).unwrap();
+    fs::create_dir_all(&root_b).unwrap();
+    write_file(
+        &root_a.join("main.ts"),
+        "export function entry() { leaf(); }\nfunction leaf() {}\n",
+    );
+    write_file(
+        &root_b.join("main.ts"),
+        "export function entry() { leaf(); }\nfunction leaf() {}\n",
+    );
+    let root_a = fs::canonicalize(&root_a).unwrap_or(root_a);
+    let root_b = fs::canonicalize(&root_b).unwrap_or(root_b);
+    let store_dir = dir.path().join("store");
+    let (store, _) = CallGraphStore::cold_build_with_lease(
+        store_dir.clone(),
+        root_a.clone(),
+        &project_files(&root_a),
+    )
+    .unwrap();
+    let source_sqlite = store.sqlite_path().to_path_buf();
+    drop(store);
+
+    let bridge_sqlite = copy_sqlite_file_set_to_legacy_root(&source_sqlite, &store_dir, &root_b);
+    let fixed_mtime = FileTime::from_unix_time(1_700_000_000, 0);
+    filetime::set_file_mtime(&bridge_sqlite, fixed_mtime).unwrap();
+
+    let readonly = CallGraphStore::open_readonly(store_dir, root_b.clone())
+        .unwrap()
+        .expect("worktree bridge should read the existing store without writes");
+    assert_eq!(readonly.project_root(), root_b.as_path());
+    assert_eq!(
+        backend_workspace_roots(&bridge_sqlite),
+        vec![root_a.display().to_string()],
+        "readonly open must not rewrite metadata roots"
+    );
+    assert_eq!(
+        FileTime::from_last_modification_time(&fs::metadata(&bridge_sqlite).unwrap()),
+        fixed_mtime
+    );
+}
+
+#[test]
+fn live_poisoned_callgraph_db_copy_recovers_projection_if_available() {
+    let Some(home) = std::env::var_os("HOME") else {
+        eprintln!("skipping live poisoned DB copy test: HOME unset");
+        return;
+    };
+    let source = PathBuf::from(home)
+        .join(".local/share/cortexkit/aft/opencode/callgraph/90ff783f3f4c5cf2.sqlite");
+    if !source.is_file() {
+        eprintln!(
+            "skipping live poisoned DB copy test: {} is not present",
+            source.display()
+        );
+        return;
+    }
+
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .expect("repo root from CARGO_MANIFEST_DIR");
+    let repo_root = fs::canonicalize(repo_root).expect("canonical repo root");
+    let dir = tempdir().unwrap();
+    let store_dir = dir.path().join("callgraph");
+    let copied = legacy_sqlite_path_for_root(&store_dir, &repo_root);
+    copy_sqlite_file_set(&source, &copied);
+
+    let store = CallGraphStore::open_ready_repairing(store_dir, repo_root.clone())
+        .unwrap()
+        .expect("copied ready DB should open");
+    let snapshot = project_dead_code_snapshot(store.sqlite_path()).unwrap();
+    assert!(
+        !snapshot.files.is_empty(),
+        "live-ish copied DB should recover to a serving projection"
+    );
+    assert_eq!(
+        backend_workspace_roots(store.sqlite_path()),
+        vec![repo_root.display().to_string()]
+    );
+}
+
+#[test]
 #[ignore]
 fn measure_current_worktree_cold_build() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1401,6 +1617,131 @@ fn cold_edges(root: &Path) -> BTreeSet<StoredEdge> {
 
 fn project_files(root: &Path) -> Vec<PathBuf> {
     walk_project_files(root).collect()
+}
+
+const TEST_STORE_DATA_PATH_COLUMNS: &[(&str, &str)] = &[
+    ("files", "path"),
+    ("nodes", "file_path"),
+    ("refs", "caller_file"),
+    ("refs", "target_file"),
+    ("file_dependencies", "file_path"),
+    ("file_dependencies", "dep_file"),
+    ("edges", "target_file"),
+    ("dispatch_hints", "file"),
+    ("backend_file_state", "file_path"),
+];
+
+fn legacy_sqlite_path_for_root(store_dir: &Path, root: &Path) -> PathBuf {
+    store_dir.join(format!(
+        "{}.sqlite",
+        aft::search_index::project_cache_key(root)
+    ))
+}
+
+fn copy_sqlite_file_set_to_legacy_root(
+    source_sqlite: &Path,
+    store_dir: &Path,
+    root: &Path,
+) -> PathBuf {
+    let destination = legacy_sqlite_path_for_root(store_dir, root);
+    copy_sqlite_file_set(source_sqlite, &destination);
+    destination
+}
+
+fn copy_sqlite_file_set(source: &Path, destination: &Path) {
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    remove_sqlite_file_set_for_test(destination);
+    fs::copy(source, destination).unwrap();
+    for suffix in ["-wal", "-shm"] {
+        let source_sidecar = sqlite_sidecar_path(source, suffix);
+        if source_sidecar.exists() {
+            fs::copy(source_sidecar, sqlite_sidecar_path(destination, suffix)).unwrap();
+        }
+    }
+}
+
+fn remove_sqlite_file_set_for_test(path: &Path) {
+    let _ = fs::remove_file(path);
+    let _ = fs::remove_file(sqlite_sidecar_path(path, "-wal"));
+    let _ = fs::remove_file(sqlite_sidecar_path(path, "-shm"));
+}
+
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn backend_workspace_roots(sqlite_path: &Path) -> Vec<String> {
+    let conn = Connection::open(sqlite_path).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT workspace_root
+             FROM backend_file_state
+             ORDER BY workspace_root",
+        )
+        .unwrap();
+    stmt.query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+fn duplicate_backend_workspace_root(sqlite_path: &Path, root: &Path) {
+    let conn = Connection::open(sqlite_path).unwrap();
+    conn.execute(
+        "INSERT OR IGNORE INTO backend_file_state(
+            backend, workspace_root, file_path, content_hash, status, updated_at
+         )
+         SELECT backend, ?1, file_path, content_hash, status, updated_at
+         FROM backend_file_state",
+        params![root.display().to_string()],
+    )
+    .unwrap();
+}
+
+fn poison_files_path_with_absolute_root(sqlite_path: &Path, absolute_path: &Path) {
+    let conn = Connection::open(sqlite_path).unwrap();
+    conn.execute(
+        "UPDATE files SET path = ?1 WHERE path = 'main.ts'",
+        params![absolute_path.display().to_string()],
+    )
+    .unwrap();
+}
+
+fn store_has_absolute_data_paths(sqlite_path: &Path) -> bool {
+    let conn = Connection::open(sqlite_path).unwrap();
+    for (table, column) in TEST_STORE_DATA_PATH_COLUMNS {
+        let sql = format!(
+            "SELECT DISTINCT {column} FROM {table} WHERE {column} IS NOT NULL AND {column} <> ''"
+        );
+        let mut stmt = conn.prepare(&sql).unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        while let Some(row) = rows.next().unwrap() {
+            let value: String = row.get(0).unwrap();
+            if stored_path_looks_absolute(&value) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn stored_path_looks_absolute(value: &str) -> bool {
+    if Path::new(value).is_absolute() || value.starts_with('/') {
+        return true;
+    }
+    let bytes = value.as_bytes();
+    if bytes.len() >= 3
+        && bytes[1] == b':'
+        && (bytes[2] == b'/' || bytes[2] == b'\\')
+        && bytes[0].is_ascii_alphabetic()
+    {
+        return true;
+    }
+    value.starts_with("\\\\") || value.starts_with("//")
 }
 
 fn dead_code_job(

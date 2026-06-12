@@ -150,6 +150,22 @@ pub struct CallGraphStore {
     conn: Mutex<Connection>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OpenRootRepair {
+    None,
+    ReRooted,
+    NeedsRebuild {
+        previous_roots: Vec<String>,
+        current_root: String,
+        reason: String,
+    },
+}
+
+struct OpenedStore {
+    store: CallGraphStore,
+    root_repair: OpenRootRepair,
+}
+
 #[derive(Debug, Clone)]
 pub struct ColdBuildStats {
     pub files: usize,
@@ -468,7 +484,24 @@ impl CallGraphStore {
         // path so a brand-new store still gets a writable DB + schema.
         let (sqlite_path, generation) = resolve_ready_target(&callgraph_dir, &project_key)
             .unwrap_or_else(|| (legacy_sqlite_path(&callgraph_dir, &project_key), None));
-        Self::open_at_path(project_root, project_key, sqlite_path, generation, true)
+        let OpenedStore { store, root_repair } = Self::open_at_path(
+            project_root.clone(),
+            project_key,
+            sqlite_path,
+            generation,
+            true,
+        )?;
+        match root_repair {
+            OpenRootRepair::NeedsRebuild { .. } => {
+                log_root_repair_rebuild(&root_repair);
+                drop(store);
+                let files = crate::callgraph::walk_project_files(&project_root).collect::<Vec<_>>();
+                let (store, _stats) =
+                    Self::cold_build_with_lease(callgraph_dir, project_root, &files)?;
+                Ok(store)
+            }
+            OpenRootRepair::None | OpenRootRepair::ReRooted => Ok(store),
+        }
     }
 
     pub fn open_readonly(callgraph_dir: PathBuf, project_root: PathBuf) -> Result<Option<Self>> {
@@ -489,6 +522,40 @@ impl CallGraphStore {
             generation,
             conn,
         )))
+    }
+
+    /// Open the currently-published ready store with write access so moved-root
+    /// metadata can be repaired before projection readers consume it. Unlike
+    /// [`open`], this preserves the read path's cold/mid-build behavior: if no
+    /// ready generation exists, it returns `Ok(None)` instead of creating an
+    /// empty legacy database. Worktree bridges must keep using [`open_readonly`].
+    pub fn open_ready_repairing(
+        callgraph_dir: PathBuf,
+        project_root: PathBuf,
+    ) -> Result<Option<Self>> {
+        let project_key = crate::search_index::project_cache_key(&project_root);
+        let Some((sqlite_path, generation)) = resolve_ready_target(&callgraph_dir, &project_key)
+        else {
+            return Ok(None);
+        };
+        let OpenedStore { store, root_repair } = Self::open_at_path(
+            project_root.clone(),
+            project_key,
+            sqlite_path,
+            generation,
+            true,
+        )?;
+        match root_repair {
+            OpenRootRepair::NeedsRebuild { .. } => {
+                log_root_repair_rebuild(&root_repair);
+                drop(store);
+                let files = crate::callgraph::walk_project_files(&project_root).collect::<Vec<_>>();
+                let (store, _stats) =
+                    Self::cold_build_with_lease(callgraph_dir, project_root, &files)?;
+                Ok(Some(store))
+            }
+            OpenRootRepair::None | OpenRootRepair::ReRooted => Ok(Some(store)),
+        }
     }
 
     pub fn cold_build_with_lease(
@@ -516,9 +583,42 @@ impl CallGraphStore {
         let lock_path = callgraph_dir.join(format!("{project_key}.build.lock"));
         let _guard = crate::fs_lock::try_acquire(&lock_path, Duration::from_secs(30))?;
         // Another process may have published a ready generation while we waited
-        // for the lock — open it instead of rebuilding.
-        if !Self::needs_cold_build(&callgraph_dir, &project_root)? {
-            return Ok((Self::open(callgraph_dir, project_root)?, None));
+        // for the lock — open it instead of rebuilding. If that generation is
+        // from this same project at an older filesystem root, repair the root
+        // metadata in-place while still holding the build lease. If data rows
+        // contain absolute paths, publish a fresh generation under this lease
+        // rather than recursively reacquiring the same lock.
+        if let Some((sqlite_path, generation)) = resolve_ready_target(&callgraph_dir, &project_key)
+        {
+            let OpenedStore { store, root_repair } = Self::open_at_path(
+                project_root.clone(),
+                project_key.clone(),
+                sqlite_path,
+                generation,
+                true,
+            )?;
+            match root_repair {
+                OpenRootRepair::NeedsRebuild { .. } => {
+                    log_root_repair_rebuild(&root_repair);
+                    drop(store);
+                    let (stats, generation) = Self::cold_build_publish_locked(
+                        &callgraph_dir,
+                        &project_root,
+                        &project_key,
+                        files,
+                    )?;
+                    let store = Self::open_generation(
+                        &callgraph_dir,
+                        project_root,
+                        project_key,
+                        generation,
+                    )?;
+                    return Ok((store, Some(stats)));
+                }
+                OpenRootRepair::None | OpenRootRepair::ReRooted => {
+                    return Ok((store, None));
+                }
+            }
         }
         let (stats, generation) =
             Self::cold_build_publish_locked(&callgraph_dir, &project_root, &project_key, files)?;
@@ -558,7 +658,8 @@ impl CallGraphStore {
                 temp_path.clone(),
                 None,
                 false,
-            )?;
+            )?
+            .store;
             let stats = temp_store.cold_build(files)?;
             temp_store.prepare_for_atomic_swap()?;
             stats
@@ -587,7 +688,7 @@ impl CallGraphStore {
         generation: String,
     ) -> Result<Self> {
         let gen_path = callgraph_dir.join(&generation);
-        Self::open_at_path(project_root, project_key, gen_path, Some(generation), true)
+        Ok(Self::open_at_path(project_root, project_key, gen_path, Some(generation), true)?.store)
     }
 
     pub fn needs_cold_build(callgraph_dir: &Path, project_root: &Path) -> Result<bool> {
@@ -603,24 +704,20 @@ impl CallGraphStore {
         sqlite_path: PathBuf,
         generation: Option<String>,
         use_wal: bool,
-    ) -> Result<Self> {
+    ) -> Result<OpenedStore> {
         if let Some(parent) = sqlite_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(&sqlite_path)?;
+        let mut conn = Connection::open(&sqlite_path)?;
         if use_wal {
             configure_connection(&conn)?;
         } else {
             configure_build_connection(&conn)?;
         }
         initialize_schema(&conn)?;
-        Ok(Self::from_connection(
-            project_root,
-            project_key,
-            sqlite_path,
-            generation,
-            conn,
-        ))
+        let root_repair = reconcile_workspace_roots(&mut conn, &project_root)?;
+        let store = Self::from_connection(project_root, project_key, sqlite_path, generation, conn);
+        Ok(OpenedStore { store, root_repair })
     }
 
     fn prepare_for_atomic_swap(&self) -> Result<()> {
@@ -2065,6 +2162,116 @@ fn clear_tables(tx: &Transaction<'_>) -> Result<()> {
          DELETE FROM files;",
     )?;
     Ok(())
+}
+
+const STORE_DATA_PATH_COLUMNS: &[(&str, &str)] = &[
+    ("files", "path"),
+    ("nodes", "file_path"),
+    ("refs", "caller_file"),
+    ("refs", "target_file"),
+    ("file_dependencies", "file_path"),
+    ("file_dependencies", "dep_file"),
+    ("edges", "target_file"),
+    ("dispatch_hints", "file"),
+    ("backend_file_state", "file_path"),
+];
+
+fn reconcile_workspace_roots(conn: &mut Connection, project_root: &Path) -> Result<OpenRootRepair> {
+    let roots = stored_workspace_roots(conn)?;
+    let current_root = project_root.display().to_string();
+    if roots.is_empty() || (roots.len() == 1 && roots[0] == current_root) {
+        return Ok(OpenRootRepair::None);
+    }
+
+    if let Some(sample) = sample_absolute_data_path(conn)? {
+        return Ok(OpenRootRepair::NeedsRebuild {
+            previous_roots: roots,
+            current_root,
+            reason: format!("absolute store data path row {sample}"),
+        });
+    }
+
+    let tx = conn.transaction()?;
+    tx.execute(
+        "UPDATE OR IGNORE backend_file_state
+         SET workspace_root = ?1
+         WHERE workspace_root <> ?1",
+        params![&current_root],
+    )?;
+    tx.execute(
+        "DELETE FROM backend_file_state WHERE workspace_root <> ?1",
+        params![&current_root],
+    )?;
+    tx.commit()?;
+
+    crate::slog_info!(
+        "callgraph store re-rooted from {} to {}",
+        roots.join(", "),
+        current_root
+    );
+    Ok(OpenRootRepair::ReRooted)
+}
+
+fn stored_workspace_roots(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT workspace_root
+         FROM backend_file_state
+         ORDER BY workspace_root",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn sample_absolute_data_path(conn: &Connection) -> Result<Option<String>> {
+    for (table, column) in STORE_DATA_PATH_COLUMNS {
+        let sql = format!(
+            "SELECT DISTINCT {column} FROM {table} WHERE {column} IS NOT NULL AND {column} <> ''"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let value: String = row.get(0)?;
+            if stored_path_is_absolute(&value) {
+                return Ok(Some(format!("{table}.{column}={value}")));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn stored_path_is_absolute(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    if Path::new(value).is_absolute() || value.starts_with('/') {
+        return true;
+    }
+    let bytes = value.as_bytes();
+    if bytes.len() >= 3
+        && bytes[1] == b':'
+        && (bytes[2] == b'/' || bytes[2] == b'\\')
+        && bytes[0].is_ascii_alphabetic()
+    {
+        return true;
+    }
+    value.starts_with("\\\\") || value.starts_with("//")
+}
+
+fn log_root_repair_rebuild(repair: &OpenRootRepair) {
+    if let OpenRootRepair::NeedsRebuild {
+        previous_roots,
+        current_root,
+        reason,
+    } = repair
+    {
+        crate::slog_info!(
+            "callgraph store root mismatch from {} to {} requires cold rebuild: {}",
+            previous_roots.join(", "),
+            current_root,
+            reason
+        );
+    }
 }
 
 /// Nanosecond clock used to make temp/generation file names unique.
