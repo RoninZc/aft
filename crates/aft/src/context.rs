@@ -2464,7 +2464,11 @@ mod status_bar_tests {
         use crate::lsp::roots::ServerKey;
 
         let ctx = ctx();
-        let root = std::path::PathBuf::from("/proj");
+        let root = if cfg!(windows) {
+            std::path::PathBuf::from(r"C:\proj")
+        } else {
+            std::path::PathBuf::from("/proj")
+        };
         ctx.set_canonical_cache_root(root.clone());
         ctx.update_status_bar_tier2(Some(0), Some(0), Some(0), Some(0), false);
 
