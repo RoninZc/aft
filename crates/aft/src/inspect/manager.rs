@@ -1258,8 +1258,15 @@ fn build_tier2_callgraph_snapshot(job: &InspectJob) -> Option<Arc<CallgraphSnaps
         return None;
     };
 
-    let store = match CallGraphStore::open_readonly(callgraph_dir.clone(), job.project_root.clone())
-    {
+    // Tier-2 refresh is skipped before jobs are submitted from worktree
+    // bridges, so this non-readonly open may repair moved-root metadata (or
+    // publish a one-time cold rebuild) for the main checkout. Worktree bridges
+    // keep their read-only posture by using CallGraphStore::open_readonly via
+    // AppContext and never queueing Tier-2 refresh jobs.
+    let store = match CallGraphStore::open_ready_repairing(
+        callgraph_dir.clone(),
+        job.project_root.clone(),
+    ) {
         Ok(Some(store)) => store,
         Ok(None) => {
             crate::slog_info!(
