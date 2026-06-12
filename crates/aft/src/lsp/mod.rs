@@ -1,8 +1,8 @@
 pub mod child_registry;
 pub mod client;
 pub mod diagnostics;
-pub mod environmental;
 pub mod document;
+pub mod environmental;
 pub mod jsonrpc;
 pub mod manager;
 pub mod position;

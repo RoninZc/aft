@@ -21,12 +21,6 @@ fn is_environmental_message(message: &str, code: &str) -> bool {
     if lower.contains("could not find a valid typescript installation") {
         return true;
     }
-    if lower.contains("cannot find global type") {
-        return true;
-    }
-    if lower.contains("failed to resolve types package") {
-        return true;
-    }
 
     // JSON / $schema fetch failures (vscode-json-languageservice and peers).
     if message_contains_schema_fetch_failure(&lower) {
@@ -34,10 +28,8 @@ fn is_environmental_message(message: &str, code: &str) -> bool {
     }
 
     // Known TS codes for config / project setup (not per-line source defects).
-    matches!(
-        code,
-        "18003" | "TS18003" | "2688" | "TS2688" | "6053" | "TS6053"
-    ) || lower.contains("no inputs were found in config file")
+    matches!(code, "18003" | "TS18003" | "6053" | "TS6053")
+        || lower.contains("no inputs were found in config file")
 }
 
 fn message_contains_schema_fetch_failure(lower: &str) -> bool {
@@ -112,8 +104,21 @@ mod tests {
     }
 
     #[test]
+    fn global_types_typo_is_not_environmental() {
+        assert!(!is_environmental_diagnostic(&stored(
+            "Cannot find global type 'NotARealPackage'.",
+            Some("TS2688"),
+            Some("typescript"),
+        )));
+    }
+
+    #[test]
     fn mixed_file_classifier_is_per_diagnostic() {
-        let syntax = stored("Cannot find name 'foo'.", Some("TS2304"), Some("typescript"));
+        let syntax = stored(
+            "Cannot find name 'foo'.",
+            Some("TS2304"),
+            Some("typescript"),
+        );
         let schema = stored(
             "Failed to load schema from https://cdn.example/pkg/schema.json",
             None,
