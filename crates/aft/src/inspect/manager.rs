@@ -668,11 +668,14 @@ impl InspectManager {
         }))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn tier2_run_with_reuse_job(
         &self,
         job: &InspectJob,
         cache: &InspectCache,
     ) -> Result<InspectScanSuccess, String> {
+        let mut phases = Tier2PhaseTimings::default();
+        let phase_started = Instant::now();
         let cached_records = load_contribution_freshness(cache, job.category)?;
         let current_by_relative = current_project_files(&job.project_root, &job.scope_files);
         let cached_relative = cached_records
@@ -719,6 +722,7 @@ impl InspectManager {
                 scan_by_relative.insert(relative.clone(), file.clone());
             }
         }
+        phases.freshness = phase_started.elapsed();
 
         let mut scan_files = scan_by_relative.into_values().collect::<Vec<_>>();
         if !scan_files.is_empty() {
@@ -728,14 +732,19 @@ impl InspectManager {
             if scan_job.category == InspectCategory::DeadCode
                 && scan_job.callgraph_snapshot.is_none()
             {
+                let snapshot_started = Instant::now();
                 scan_job.callgraph_snapshot = build_tier2_callgraph_snapshot(&scan_job);
+                phases.snapshot += snapshot_started.elapsed();
             }
             aggregate_job.callgraph_snapshot = scan_job.callgraph_snapshot.clone();
             #[cfg(debug_assertions)]
             if cold_cache {
                 std::thread::sleep(Duration::from_millis(10));
             }
+            let scan_started = Instant::now();
             let scan_result = run_tier2_scan(&scan_job);
+            phases.scan += scan_started.elapsed();
+            phases.scanned_files += scan_files.len();
             let scan_success = scan_result.outcome.map_err(|message| {
                 format!("{} incremental scan failed: {message}", job.category)
             })?;
@@ -753,6 +762,7 @@ impl InspectManager {
                 cache
                     .touch_tier2_last_full_run(job.category)
                     .map_err(|error| error.to_string())?;
+                phases.log(job.category);
                 return Ok(InspectScanSuccess {
                     scanned_files: scan_files,
                     contributions: Vec::new(),
@@ -761,6 +771,7 @@ impl InspectManager {
             }
         }
 
+        let db_started = Instant::now();
         let mut contribution_set_hash = if has_updates {
             cache
                 .apply_contribution_updates(job.category, updates)
@@ -770,6 +781,7 @@ impl InspectManager {
                 .contribution_set_hash(job.category)
                 .map_err(|error| error.to_string())?
         };
+        phases.db = db_started.elapsed();
 
         if let Some(aggregate) = cache
             .load_aggregate_if_hash_matches(job.category, &contribution_set_hash)
@@ -779,6 +791,7 @@ impl InspectManager {
                 .touch_tier2_last_full_run(job.category)
                 .map_err(|error| error.to_string())?;
             let contributions = load_contributions(cache, job)?;
+            phases.log(job.category);
             return Ok(InspectScanSuccess {
                 scanned_files: scan_files,
                 contributions,
@@ -799,9 +812,14 @@ impl InspectManager {
                 if rescan_job.category == InspectCategory::DeadCode
                     && rescan_job.callgraph_snapshot.is_none()
                 {
+                    let snapshot_started = Instant::now();
                     rescan_job.callgraph_snapshot = build_tier2_callgraph_snapshot(&rescan_job);
+                    phases.snapshot += snapshot_started.elapsed();
                 }
+                let scan_started = Instant::now();
                 let scan_result = run_tier2_scan(&rescan_job);
+                phases.scan += scan_started.elapsed();
+                phases.scanned_files += full_scan_files.len();
                 let scan_success = scan_result.outcome.map_err(|message| {
                     format!(
                         "{} full rescan after entry-point cache miss failed: {message}",
@@ -812,9 +830,11 @@ impl InspectManager {
                     upserts: scan_success.contributions,
                     ..Tier2ContributionUpdates::default()
                 };
+                let db_started = Instant::now();
                 contribution_set_hash = cache
                     .apply_contribution_updates(job.category, rescan_updates)
                     .map_err(|error| error.to_string())?;
+                phases.db += db_started.elapsed();
                 aggregate_job.callgraph_snapshot = rescan_job.callgraph_snapshot.clone();
                 scan_files = full_scan_files;
 
@@ -826,6 +846,7 @@ impl InspectManager {
                         .touch_tier2_last_full_run(job.category)
                         .map_err(|error| error.to_string())?;
                     let contributions = load_contributions(cache, job)?;
+                    phases.log(job.category);
                     return Ok(InspectScanSuccess {
                         scanned_files: scan_files,
                         contributions,
@@ -838,13 +859,18 @@ impl InspectManager {
         if aggregate_job.category == InspectCategory::DeadCode
             && aggregate_job.callgraph_snapshot.is_none()
         {
+            let snapshot_started = Instant::now();
             aggregate_job.callgraph_snapshot = build_tier2_callgraph_snapshot(&aggregate_job);
+            phases.snapshot += snapshot_started.elapsed();
         }
+        let rollup_started = Instant::now();
         let contributions = load_contributions(cache, &aggregate_job)?;
         let aggregate = roll_up_tier2_contributions(&aggregate_job, &contributions);
         cache
             .store_tier2_aggregate(job.key.clone(), &contribution_set_hash, aggregate.clone())
             .map_err(|error| error.to_string())?;
+        phases.rollup = rollup_started.elapsed();
+        phases.log(job.category);
 
         Ok(InspectScanSuccess {
             scanned_files: scan_files,
@@ -1109,6 +1135,46 @@ fn validate_tier2_read_category(category: InspectCategory) -> Result<(), JobOutc
         });
     }
     Ok(())
+}
+
+/// Phase-level wall-time attribution for one Tier-2 reuse=miss pass.
+///
+/// Exists to self-attribute pathological scans (note #263 class: a 100ms
+/// unused_exports pass once took 677s under release-gate machine load) without
+/// needing a lucky live `sample`. Logged as ONE info line per pass, only when
+/// real work happened (scan/snapshot/rollup), so quiet reuse passes stay silent.
+#[derive(Default)]
+struct Tier2PhaseTimings {
+    /// Freshness verification of cached contributions (file stat + hash reads).
+    freshness: Duration,
+    /// Callgraph store snapshot projection (dead_code only).
+    snapshot: Duration,
+    /// Scanner compute over files needing (re)scan.
+    scan: Duration,
+    /// SQLite contribution upserts/deletes (busy-wait contention shows here).
+    db: Duration,
+    /// Aggregate roll-up + store.
+    rollup: Duration,
+    scanned_files: usize,
+}
+
+impl Tier2PhaseTimings {
+    fn log(&self, category: InspectCategory) {
+        let worked = self.scan + self.snapshot + self.rollup + self.db;
+        if worked < Duration::from_millis(50) {
+            return;
+        }
+        crate::slog_info!(
+            "perf tier2 phases category={} freshness={}ms snapshot={}ms scan={}ms({} files) db={}ms rollup={}ms",
+            category,
+            self.freshness.as_millis(),
+            self.snapshot.as_millis(),
+            self.scan.as_millis(),
+            self.scanned_files,
+            self.db.as_millis(),
+            self.rollup.as_millis()
+        );
+    }
 }
 
 fn scope_files(project_root: &Path, scope: &JobScope) -> Vec<PathBuf> {
