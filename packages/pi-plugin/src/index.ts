@@ -184,12 +184,11 @@ const PLUGIN_VERSION: string = (() => {
   }
 })();
 
-const ANNOUNCEMENT_VERSION = "0.38.0";
+const ANNOUNCEMENT_VERSION = "0.39.0";
 const ANNOUNCEMENT_FEATURES: string[] = [
-  "Code Health you can trust: dead code and unused exports are back in the status displays, rebuilt on a real TS/JS module-graph engine (oxc) — barrel re-exports, entry points, and dynamic imports resolve correctly now.",
-  "Tools stay responsive during builds: filesystem events are processed off the request thread, so a cargo/webpack compile no longer queues your tool calls behind an event flood.",
-  "Pascal support in outline, zoom, and the AST tools.",
-  "Transient environment errors (schema fetch timeouts) no longer count as code errors in the status bar.",
+  "Accurate Rust dead code: constructors and associated functions reached through receiver-type inference are no longer mis-reported as dead.",
+  "Code Health scans reparse only the file you changed instead of the whole project on every edit — a single-file edit dropped from ~3s of scan work to ~130ms on this repo, byte-identical results.",
+  "R language support in outline, zoom, and the AST tools.",
 ];
 
 /**
