@@ -1318,10 +1318,7 @@ impl SemanticIndex {
         )> = files
             .par_iter()
             .map_init(HashMap::new, |parsers, file| {
-                let result = collect_file_metadata(file).and_then(|metadata| {
-                    collect_file_chunks(project_root, file, parsers)
-                        .map(|chunks| (metadata, chunks))
-                });
+                let result = collect_semantic_file(project_root, file, parsers);
                 (file.clone(), result)
             })
             .collect();
@@ -2911,8 +2908,42 @@ fn read_string_stream<R: Read>(
     Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 
+struct SourceLineCache<'a> {
+    lines: Vec<&'a str>,
+    line_starts: Vec<usize>,
+}
+
+impl<'a> SourceLineCache<'a> {
+    fn new(source: &'a str) -> Self {
+        let lines: Vec<&'a str> = source.lines().collect();
+        let mut line_starts = Vec::with_capacity(lines.len());
+        let bytes = source.as_bytes();
+        let mut offset = 0usize;
+        for line in &lines {
+            line_starts.push(offset);
+            offset += line.len();
+            if bytes.get(offset) == Some(&b'\r') && bytes.get(offset + 1) == Some(&b'\n') {
+                offset += 2;
+            } else if bytes.get(offset) == Some(&b'\n') {
+                offset += 1;
+            }
+        }
+        Self { lines, line_starts }
+    }
+
+    fn len(&self) -> usize {
+        debug_assert_eq!(self.lines.len(), self.line_starts.len());
+        self.line_starts.len()
+    }
+}
+
 /// Build enriched embedding text from a symbol with cAST-style context
-fn build_embed_text(symbol: &Symbol, source: &str, file: &Path, project_root: &Path) -> String {
+fn build_embed_text_with_lines(
+    symbol: &Symbol,
+    line_cache: &SourceLineCache<'_>,
+    file: &Path,
+    project_root: &Path,
+) -> String {
     let relative = file
         .strip_prefix(project_root)
         .unwrap_or(file)
@@ -2950,12 +2981,11 @@ fn build_embed_text(symbol: &Symbol, source: &str, file: &Path, project_root: &P
     }
 
     // Add body snippet (first ~300 chars of symbol body)
-    let lines: Vec<&str> = source.lines().collect();
-    let start = (symbol.range.start_line as usize).min(lines.len());
+    let start = (symbol.range.start_line as usize).min(line_cache.len());
     // range.end_line is inclusive 0-based; +1 makes it an exclusive slice bound.
-    let end = (symbol.range.end_line as usize + 1).min(lines.len());
+    let end = (symbol.range.end_line as usize + 1).min(line_cache.len());
     if start < end {
-        let body: String = lines[start..end]
+        let body: String = line_cache.lines[start..end]
             .iter()
             .take(15) // max 15 lines
             .copied()
@@ -2976,6 +3006,12 @@ fn build_embed_text(symbol: &Symbol, source: &str, file: &Path, project_root: &P
     truncate_chars(&text, MAX_EMBED_TEXT_CHARS)
 }
 
+#[cfg(test)]
+fn build_embed_text(symbol: &Symbol, source: &str, file: &Path, project_root: &Path) -> String {
+    let line_cache = SourceLineCache::new(source);
+    build_embed_text_with_lines(symbol, &line_cache, file, project_root)
+}
+
 /// Upper bound on characters in a single chunk's `embed_text`. Keeps any one
 /// input below typical embedding-backend physical batch limits (~512 tokens)
 /// so an oversized symbol cannot abort the whole index build.
@@ -2985,9 +3021,9 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
-fn first_leading_doc_comment(source: &str) -> String {
-    let lines: Vec<&str> = source.lines().collect();
-    let Some((start, first)) = lines
+fn first_leading_doc_comment(line_cache: &SourceLineCache<'_>) -> String {
+    let Some((start, first)) = line_cache
+        .lines
         .iter()
         .enumerate()
         .find(|(_, line)| !line.trim().is_empty())
@@ -2998,7 +3034,7 @@ fn first_leading_doc_comment(source: &str) -> String {
     let trimmed = first.trim_start();
     if trimmed.starts_with("/**") {
         let mut comment = Vec::new();
-        for line in lines.iter().skip(start) {
+        for line in line_cache.lines.iter().skip(start) {
             comment.push(*line);
             if line.contains("*/") {
                 break;
@@ -3008,7 +3044,8 @@ fn first_leading_doc_comment(source: &str) -> String {
     }
 
     if trimmed.starts_with("///") || trimmed.starts_with("//!") {
-        let comment = lines
+        let comment = line_cache
+            .lines
             .iter()
             .skip(start)
             .take_while(|line| {
@@ -3031,6 +3068,23 @@ pub fn build_file_summary_chunk(
     top_exports: &[&str],
     top_export_signatures: &[Option<&str>],
 ) -> SemanticChunk {
+    let line_cache = SourceLineCache::new(source);
+    build_file_summary_chunk_with_lines(
+        file,
+        project_root,
+        &line_cache,
+        top_exports,
+        top_export_signatures,
+    )
+}
+
+fn build_file_summary_chunk_with_lines(
+    file: &Path,
+    project_root: &Path,
+    line_cache: &SourceLineCache<'_>,
+    top_exports: &[&str],
+    top_export_signatures: &[Option<&str>],
+) -> SemanticChunk {
     let relative = file.strip_prefix(project_root).unwrap_or(file);
     let rel_path = relative.to_string_lossy();
     let parent_dir = relative
@@ -3041,7 +3095,7 @@ pub fn build_file_summary_chunk(
         .file_stem()
         .map(|stem| stem.to_string_lossy().to_string())
         .unwrap_or_default();
-    let doc = first_leading_doc_comment(source);
+    let doc = first_leading_doc_comment(line_cache);
     let exports = top_exports
         .iter()
         .take(5)
@@ -3130,22 +3184,9 @@ pub fn is_semantic_indexed_extension(path: &Path) -> bool {
                 | "pp"
                 | "dpr"
                 | "dpk"
-                | "lpr"
+                | "lpr",
         )
     )
-}
-
-fn collect_file_metadata(file: &Path) -> Result<IndexedFileMetadata, String> {
-    let metadata = fs::metadata(file).map_err(|error| error.to_string())?;
-    let mtime = metadata.modified().map_err(|error| error.to_string())?;
-    let content_hash = cache_freshness::hash_file_if_small(file, metadata.len())
-        .map_err(|error| error.to_string())?
-        .unwrap_or_else(cache_freshness::zero_hash);
-    Ok(IndexedFileMetadata {
-        mtime,
-        size: metadata.len(),
-        content_hash,
-    })
 }
 
 fn canonicalize_existing_or_deleted_path(path: &Path) -> PathBuf {
@@ -3176,6 +3217,47 @@ fn canonicalize_existing_or_deleted_path(path: &Path) -> PathBuf {
 /// pathological tail.
 const MAX_SEMANTIC_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
+fn collect_semantic_file(
+    project_root: &Path,
+    file: &Path,
+    parsers: &mut HashMap<crate::parser::LangId, Parser>,
+) -> Result<(IndexedFileMetadata, Vec<SemanticChunk>), String> {
+    let metadata = fs::metadata(file).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("not a regular file".to_string());
+    }
+    let mtime = metadata.modified().map_err(|error| error.to_string())?;
+    let size = metadata.len();
+
+    if !is_semantic_indexed_extension(file) {
+        return Err("unsupported file extension".to_string());
+    }
+    let lang = detect_language(file).ok_or_else(|| "unsupported file extension".to_string())?;
+
+    let mut indexed_metadata = IndexedFileMetadata {
+        mtime,
+        size,
+        content_hash: cache_freshness::zero_hash(),
+    };
+
+    // OOM backstop: skip oversized files before the read + parse (tracked with
+    // zero chunks by the caller, so freshness won't re-read them every refresh).
+    if size > MAX_SEMANTIC_FILE_BYTES {
+        return Ok((indexed_metadata, Vec::new()));
+    }
+
+    let source = fs::read_to_string(file).map_err(|error| error.to_string())?;
+    indexed_metadata.content_hash = if size <= cache_freshness::CONTENT_HASH_SIZE_CAP {
+        cache_freshness::hash_bytes(source.as_bytes())
+    } else {
+        cache_freshness::zero_hash()
+    };
+
+    let chunks = collect_file_chunks_from_source(project_root, file, lang, parsers, &source)?;
+    Ok((indexed_metadata, chunks))
+}
+
+#[cfg(test)]
 fn collect_file_chunks(
     project_root: &Path,
     file: &Path,
@@ -3187,27 +3269,40 @@ fn collect_file_chunks(
     let lang = detect_language(file).ok_or_else(|| "unsupported file extension".to_string())?;
     // OOM backstop: skip oversized files before the read + parse (tracked with
     // zero chunks by the caller, so freshness won't re-read them every refresh).
-    if std::fs::metadata(file).is_ok_and(|m| m.len() > MAX_SEMANTIC_FILE_BYTES) {
+    if fs::metadata(file).is_ok_and(|m| m.len() > MAX_SEMANTIC_FILE_BYTES) {
         return Ok(Vec::new());
     }
-    let source = std::fs::read_to_string(file).map_err(|error| error.to_string())?;
+    let source = fs::read_to_string(file).map_err(|error| error.to_string())?;
+    collect_file_chunks_from_source(project_root, file, lang, parsers, &source)
+}
+
+fn collect_file_chunks_from_source(
+    project_root: &Path,
+    file: &Path,
+    lang: crate::parser::LangId,
+    parsers: &mut HashMap<crate::parser::LangId, Parser>,
+    source: &str,
+) -> Result<Vec<SemanticChunk>, String> {
     let tree = parser_for(parsers, lang)?
-        .parse(&source, None)
+        .parse(source, None)
         .ok_or_else(|| format!("tree-sitter parse returned None for {}", file.display()))?;
     let symbols =
-        extract_symbols_from_tree(&source, &tree, lang).map_err(|error| error.to_string())?;
+        extract_symbols_from_tree(source, &tree, lang).map_err(|error| error.to_string())?;
 
-    Ok(symbols_to_chunks(file, &symbols, &source, project_root))
+    Ok(symbols_to_chunks(file, &symbols, source, project_root))
 }
 
 /// Build a display snippet from a symbol's source
-fn build_snippet(symbol: &Symbol, source: &str) -> String {
-    let lines: Vec<&str> = source.lines().collect();
-    let start = (symbol.range.start_line as usize).min(lines.len());
+fn build_snippet_with_lines(symbol: &Symbol, line_cache: &SourceLineCache<'_>) -> String {
+    let start = (symbol.range.start_line as usize).min(line_cache.len());
     // range.end_line is inclusive 0-based; +1 makes it an exclusive slice bound.
-    let end = (symbol.range.end_line as usize + 1).min(lines.len());
+    let end = (symbol.range.end_line as usize + 1).min(line_cache.len());
     if start < end {
-        let snippet_lines: Vec<&str> = lines[start..end].iter().take(5).copied().collect();
+        let snippet_lines: Vec<&str> = line_cache.lines[start..end]
+            .iter()
+            .take(5)
+            .copied()
+            .collect();
         let mut snippet = snippet_lines.join("\n");
         if end - start > 5 {
             snippet.push_str("\n  ...");
@@ -3221,6 +3316,12 @@ fn build_snippet(symbol: &Symbol, source: &str) -> String {
     }
 }
 
+#[cfg(test)]
+fn build_snippet(symbol: &Symbol, source: &str) -> String {
+    let line_cache = SourceLineCache::new(source);
+    build_snippet_with_lines(symbol, &line_cache)
+}
+
 /// Convert symbols to semantic chunks with enriched context
 fn symbols_to_chunks(
     file: &Path,
@@ -3228,6 +3329,7 @@ fn symbols_to_chunks(
     source: &str,
     project_root: &Path,
 ) -> Vec<SemanticChunk> {
+    let line_cache = SourceLineCache::new(source);
     let mut chunks = Vec::new();
     let top_exports_with_signatures = symbols
         .iter()
@@ -3252,10 +3354,10 @@ fn symbols_to_chunks(
             .iter()
             .map(|(_, signature)| *signature)
             .collect::<Vec<_>>();
-        chunks.push(build_file_summary_chunk(
+        chunks.push(build_file_summary_chunk_with_lines(
             file,
             project_root,
-            source,
+            &line_cache,
             &top_exports,
             &top_export_signatures,
         ));
@@ -3280,8 +3382,8 @@ fn symbols_to_chunks(
             continue;
         }
 
-        let embed_text = build_embed_text(symbol, source, file, project_root);
-        let snippet = build_snippet(symbol, source);
+        let embed_text = build_embed_text_with_lines(symbol, &line_cache, file, project_root);
+        let snippet = build_snippet_with_lines(symbol, &line_cache);
 
         chunks.push(SemanticChunk {
             file: file.to_path_buf(),
