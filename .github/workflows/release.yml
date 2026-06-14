@@ -481,7 +481,7 @@ jobs:
       - build-linux-x64
       - build-win32-arm64
       - build-win32-x64
-      - publish-crates
+      # - publish-crates
     steps:
       - uses: actions/checkout@v5
 
