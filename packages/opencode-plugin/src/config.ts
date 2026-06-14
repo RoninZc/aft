@@ -1221,7 +1221,7 @@ const PROJECT_SAFE_TOP_LEVEL_FIELDS = new Set<keyof AftConfig>([
   // "storage_dir" — USER ONLY (controls where AFT writes).
   // "max_callgraph_files" — USER ONLY (resource budget).
   // "auto_update" — USER ONLY (silently suppressing security updates is a real risk).
-  "bridge",
+  // "bridge" — USER ONLY (governs bridge safety/restart + per-machine transport budget).
 ]);
 
 function pickProjectSafeFields(override: AftConfig): Partial<AftConfig> {
@@ -1241,18 +1241,8 @@ function getStrippedTopLevelKeys(override: AftConfig): string[] {
   if (override.url_fetch_allow_private !== undefined) stripped.push("url_fetch_allow_private");
   if (override.max_callgraph_files !== undefined) stripped.push("max_callgraph_files");
   if (override.auto_update !== undefined) stripped.push("auto_update");
+  if (override.bridge !== undefined) stripped.push("bridge");
   return stripped;
-}
-
-function mergeBridgeConfig(
-  base: AftConfig["bridge"],
-  override: AftConfig["bridge"],
-): AftConfig["bridge"] {
-  const merged = { ...base, ...override };
-  if (merged.request_timeout_ms === undefined && merged.hang_threshold === undefined) {
-    return undefined;
-  }
-  return merged;
 }
 
 function mergeConfigs(base: AftConfig, override: AftConfig): AftConfig {
@@ -1268,7 +1258,7 @@ function mergeConfigs(base: AftConfig, override: AftConfig): AftConfig {
   const experimental = mergeExperimentalConfig(base.experimental, override.experimental);
   const bash = mergeBashConfig(base.bash, override.bash);
   const inspect = mergeInspectConfig(base.inspect, override.inspect);
-  const bridge = mergeBridgeConfig(base.bridge, override.bridge);
+  const bridge = base.bridge;
 
   // STRICT ALLOWLIST: only project-safe top-level fields are inherited.
   // We deep-merge `bash` separately so the field-by-field union beats the
@@ -1277,7 +1267,6 @@ function mergeConfigs(base: AftConfig, override: AftConfig): AftConfig {
   const safeOverride = pickProjectSafeFields(override);
   delete safeOverride.bash;
   delete safeOverride.inspect;
-  delete safeOverride.bridge;
 
   return {
     ...base,

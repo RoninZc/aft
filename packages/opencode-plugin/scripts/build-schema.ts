@@ -519,7 +519,7 @@ function buildSchema(): Record<string, unknown> {
         },
         additionalProperties: false,
         description:
-          "Shared NDJSON bridge transport tuning (OpenCode and Pi). User and project configs merge; project overrides user per field.",
+          "Shared NDJSON bridge transport tuning (OpenCode and Pi). User-scoped only — project configs cannot set this block (bridge safety and per-machine transport budget).",
       },
 
       max_callgraph_files: {

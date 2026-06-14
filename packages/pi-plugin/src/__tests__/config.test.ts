@@ -742,15 +742,15 @@ describe("loadAftConfig", () => {
     });
   });
 
-  test("bridge.request_timeout_ms and hang_threshold parse and deep-merge user+project", () => {
+  test("project config cannot set bridge (strict allowlist)", () => {
     const fixture = createConfigFixture();
     writeFileSync(
       fixture.userConfigPath,
-      JSON.stringify({ bridge: { request_timeout_ms: 45_000 } }, null, 2),
+      JSON.stringify({ bridge: { request_timeout_ms: 45_000, hang_threshold: 3 } }, null, 2),
     );
     writeFileSync(
       fixture.projectConfigPath,
-      JSON.stringify({ bridge: { hang_threshold: 4 } }, null, 2),
+      JSON.stringify({ bridge: { hang_threshold: 99, request_timeout_ms: 999_999 } }, null, 2),
     );
 
     const result = runConfigLoader(fixture.projectDirectory, {
@@ -760,7 +760,8 @@ describe("loadAftConfig", () => {
     const config = JSON.parse(result.stdout) as {
       bridge?: { request_timeout_ms?: number; hang_threshold?: number };
     };
-    expect(config.bridge).toEqual({ request_timeout_ms: 45_000, hang_threshold: 4 });
+    expect(config.bridge).toEqual({ request_timeout_ms: 45_000, hang_threshold: 3 });
+    expect(result.stderr).toContain("Ignoring bridge from project config");
   });
 
   test("bridge rejects request_timeout_ms below 1000 and hang_threshold below 1", () => {
