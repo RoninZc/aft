@@ -119,9 +119,15 @@ export type { ReadFooterOptions } from "./tool-format.js";
 export { formatBridgeErrorMessage, formatReadFooter } from "./tool-format.js";
 // --- aft_zoom plain-text formatter (shared by both plugin hosts) ---
 export type {
+  RustZoomBatchEntry,
   ZoomMultiTargetEntry,
   ZoomMultiTargetResult,
   ZoomMultiTargetSymbolResult,
   ZoomResponseLike,
 } from "./zoom-format.js";
-export { formatZoomMultiTargetResult, formatZoomText } from "./zoom-format.js";
+export {
+  formatZoomMultiTargetResult,
+  formatZoomText,
+  isRustZoomBatchEnvelope,
+  unwrapRustZoomBatchEnvelope,
+} from "./zoom-format.js";
