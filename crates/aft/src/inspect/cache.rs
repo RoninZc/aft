@@ -110,7 +110,10 @@ impl From<serde_json::Error> for InspectCacheError {
 /// v18: dead_code/unused_exports aggregate hashes include the full TS/JS
 /// resolver-config dependency set (tsconfig/jsconfig variants and extends
 /// chains), so alias-only config edits invalidate verdict roll-ups.
-pub(crate) const TIER2_CONTRIBUTION_CACHE_VERSION: u32 = 18;
+/// v19: dead_code entry reachability executes side-effect-only imported modules,
+/// preserving same-file and transitive static-import liveness without marking all
+/// target exports used.
+pub(crate) const TIER2_CONTRIBUTION_CACHE_VERSION: u32 = 19;
 
 #[derive(Debug, Clone)]
 pub struct ContributionRecord {
@@ -1666,6 +1669,6 @@ mod tests {
             decoded.contribution["exports"][0]["is_type_like"].as_bool(),
             Some(true)
         );
-        assert_eq!(TIER2_CONTRIBUTION_CACHE_VERSION, 18);
+        assert_eq!(TIER2_CONTRIBUTION_CACHE_VERSION, 19);
     }
 }

@@ -5,6 +5,7 @@ use std::sync::{Arc, RwLock};
 
 use aft::callgraph_store::{project_dead_code_snapshot, CallGraphStore};
 use aft::config::Config;
+use aft::inspect::oxc_engine::{analyze_files, AnalyzeOptions, LivenessVerdict, OxcEngineResult};
 use aft::inspect::scanners::dead_code::run_dead_code_scan;
 use aft::inspect::{
     CallgraphExport, CallgraphOutboundCall, CallgraphSnapshot, InspectCategory, InspectJob,
@@ -137,6 +138,27 @@ fn aggregate_has_item(success: &InspectScanSuccess, file: &str, symbol: &str) ->
         .expect("dead-code items")
         .iter()
         .any(|item| item["file"] == file && item["symbol"] == symbol)
+}
+
+fn assert_oxc_verdict(
+    result: &OxcEngineResult,
+    file: &str,
+    symbol: &str,
+    expected: LivenessVerdict,
+) {
+    let export = result
+        .files
+        .iter()
+        .find(|item| item.relative_file == file)
+        .unwrap_or_else(|| panic!("missing file verdicts for {file}: {:#?}", result.files))
+        .exports
+        .iter()
+        .find(|export| export.symbol == symbol)
+        .unwrap_or_else(|| panic!("missing export {file}:{symbol}: {:#?}", result.files));
+    assert_eq!(
+        export.verdict, expected,
+        "unexpected verdict for {file}:{symbol}: {export:#?}"
+    );
 }
 
 fn dispatched_target(target: &str, full_callee: &str) -> String {
@@ -850,6 +872,38 @@ fn inspect_dead_code_keeps_relative_named_import_live_from_reachable_file() {
     assert_eq!(success.aggregate["count"], 1, "{:#}", success.aggregate);
     assert!(!dead_symbols.contains("Live"));
     assert!(dead_symbols.contains("Dead"));
+}
+
+#[test]
+fn inspect_dead_code_executes_side_effect_imports_without_marking_exports_used() {
+    let (_temp_dir, root, paths) = fixture_project(&[
+        ("src/main.ts", "import './setup';\n"),
+        (
+            "src/setup.ts",
+            "import { used } from './dep';\nexport function init() { return 1; }\nexport function unusedHelper() { return 2; }\ninit();\nused();\n",
+        ),
+        ("src/dep.ts", "export function used() { return 1; }\n"),
+    ]);
+
+    let result = analyze_files(
+        &root,
+        &paths,
+        AnalyzeOptions {
+            entry_points: vec![root.join("src/main.ts")],
+            entry_reachability: true,
+            ..AnalyzeOptions::default()
+        },
+    )
+    .expect("oxc analyze succeeds");
+
+    assert_oxc_verdict(&result, "src/setup.ts", "init", LivenessVerdict::Used);
+    assert_oxc_verdict(
+        &result,
+        "src/setup.ts",
+        "unusedHelper",
+        LivenessVerdict::Unused,
+    );
+    assert_oxc_verdict(&result, "src/dep.ts", "used", LivenessVerdict::Used);
 }
 
 #[test]

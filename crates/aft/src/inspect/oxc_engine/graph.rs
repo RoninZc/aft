@@ -186,7 +186,9 @@ impl<'a> GraphBuilder<'a> {
                 let Some(target) = import.target else {
                     continue;
                 };
-                if !import_binding_is_used(&module, import) {
+                if !matches!(import.fact.kind, ImportKind::SideEffect)
+                    && !import_binding_is_used(&module, import)
+                {
                     continue;
                 }
                 let mut newly_live_modules = BTreeSet::new();
