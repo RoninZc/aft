@@ -727,7 +727,7 @@ const tui: TuiPlugin = async (api) => {
   // command palette entry so the sidebar is available immediately when the
   // user opens their first session.
   try {
-    api.slots.register(createAftSidebarSlot(api, packageVersion));
+    api.slots.register(await createAftSidebarSlot(api, packageVersion));
   } catch {
     // Older OpenCode TUI hosts may not implement api.slots; fall through
     // and keep the slash command working.

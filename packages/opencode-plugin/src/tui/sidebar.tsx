@@ -20,6 +20,18 @@ import {
   type StatusCompression,
 } from "../shared/status";
 import { resolveCortexKitStorageRoot } from "../shared/storage-paths";
+import {
+  type AftTuiPrefs,
+  computeEffectiveOrder,
+  DEFAULT_PREFS,
+  DEFAULT_SLOT_ORDER,
+  PLUGIN_KEY,
+  persistCollapsedIfEnabled,
+  readTuiPreferencesFile,
+  resolveAftPrefs,
+  seedCollapsedFromPrefs,
+  watchTuiPreferences,
+} from "./preferences";
 
 const SINGLE_BORDER = { type: "single" } as any;
 const REFRESH_DEBOUNCE_MS = 200;
@@ -307,9 +319,8 @@ const SidebarContent = (props: {
   pluginVersion: string;
 }) => {
   const [status, setStatus] = createSignal<ScopedSidebarStatus | null>(null);
-  // Collapsed/expanded toggle — local UI state (not persisted), mirroring
-  // OpenCode's native MCP sidebar section. Default expanded.
-  const [collapsed, setCollapsed] = createSignal(false);
+  const [prefs, setPrefs] = createSignal<AftTuiPrefs>(structuredClone(DEFAULT_PREFS));
+  const [collapsed, setCollapsed] = createSignal(seedCollapsedFromPrefs(DEFAULT_PREFS));
   let inflight: {
     controller: AbortController;
     generation: number;
@@ -428,7 +439,21 @@ const SidebarContent = (props: {
     }, REFRESH_DEBOUNCE_MS);
   };
 
+  const reloadPrefs = async () => {
+    const root = await readTuiPreferencesFile();
+    const next = resolveAftPrefs(root);
+    setPrefs(next);
+    setCollapsed(seedCollapsedFromPrefs(next));
+    requestRender();
+  };
+
+  void reloadPrefs();
+  const unwatchPrefs = watchTuiPreferences(() => {
+    void reloadPrefs();
+  });
+
   onCleanup(() => {
+    unwatchPrefs();
     generation++;
     abortInflight();
     if (debounceTimer) clearTimeout(debounceTimer);
@@ -560,7 +585,12 @@ const SidebarContent = (props: {
         justifyContent="space-between"
         alignItems="center"
         onMouseDown={() => {
-          if (!notInitialized()) setCollapsed((x) => !x);
+          if (notInitialized()) return;
+          setCollapsed((x) => {
+            const next = !x;
+            persistCollapsedIfEnabled(prefs(), next);
+            return next;
+          });
         }}
       >
         <box flexDirection="row" alignItems="center">
@@ -570,7 +600,7 @@ const SidebarContent = (props: {
             <text fg={props.theme.background}>
               <b>
                 {notInitialized() ? "" : collapsed() ? "▶ " : "▼ "}
-                AFT
+                {prefs().header.label}
               </b>
             </text>
           </box>
@@ -587,7 +617,7 @@ const SidebarContent = (props: {
             </box>
           )}
         </box>
-        {!notInitialized() && (
+        {!notInitialized() && prefs().header.showVersion && (
           <text fg={props.theme.textMuted}>v{s()?.version ?? props.pluginVersion}</text>
         )}
       </box>
@@ -622,13 +652,17 @@ const SidebarContent = (props: {
           order of the expanded grid. */}
       {!notInitialized() && collapsed() && (
         <box width="100%" flexDirection="column">
-          <CollapsedRow theme={props.theme} label="Search Index">
-            <text fg={toneColor(props.theme, searchStatus().tone)}>●</text>
-          </CollapsedRow>
-          <CollapsedRow theme={props.theme} label="Semantic Index">
-            <text fg={toneColor(props.theme, semanticStatus().tone)}>●</text>
-          </CollapsedRow>
-          {collapsedHealthLights(statusBar()) && (
+          {prefs().sections.searchIndex && (
+            <CollapsedRow theme={props.theme} label="Search Index">
+              <text fg={toneColor(props.theme, searchStatus().tone)}>●</text>
+            </CollapsedRow>
+          )}
+          {prefs().sections.semanticIndex && (
+            <CollapsedRow theme={props.theme} label="Semantic Index">
+              <text fg={toneColor(props.theme, semanticStatus().tone)}>●</text>
+            </CollapsedRow>
+          )}
+          {prefs().sections.codeHealth && collapsedHealthLights(statusBar()) && (
             <CollapsedRow theme={props.theme} label="Code Health">
               <box flexDirection="row" gap={1}>
                 <text fg={toneColor(props.theme, collapsedHealthLights(statusBar())!.diagnostics)}>
@@ -641,7 +675,7 @@ const SidebarContent = (props: {
               </box>
             </CollapsedRow>
           )}
-          {collapsedCompressionValue(s()?.compression) && (
+          {prefs().sections.compression && collapsedCompressionValue(s()?.compression) && (
             <CollapsedRow theme={props.theme} label="Compression">
               <text fg={props.theme.textMuted}>
                 <b>{collapsedCompressionValue(s()?.compression)}</b>
@@ -654,69 +688,76 @@ const SidebarContent = (props: {
       {/* Search index */}
       {!notInitialized() && !collapsed() && (
         <>
-          <SectionHeader theme={props.theme} title="Search Index" />
-          <StatRow
-            theme={props.theme}
-            label="Status"
-            value={searchStatus().label}
-            tone={searchStatus().tone}
-          />
-          {(s()?.search_index?.files ?? null) != null && (
-            <StatRow
-              theme={props.theme}
-              label="Files"
-              value={formatCount(s()!.search_index.files)}
-              tone="muted"
-            />
-          )}
-          <StatRow
-            theme={props.theme}
-            label="Disk"
-            value={formatBytes(trigramBytes())}
-            tone="muted"
-          />
-
-          {/* Semantic index */}
-          <SectionHeader theme={props.theme} title="Semantic Index" />
-          <StatRow
-            theme={props.theme}
-            label="Status"
-            value={semanticStatus().label}
-            tone={semanticStatus().tone}
-          />
-          {semanticRefreshing() && (
-            <box width="100%">
-              <text fg={props.theme.textMuted}>{semanticRefreshing()}</text>
-            </box>
-          )}
-          {/* When loading, magic-context-style progress hint helps users see
-          background work is making progress instead of stuck. */}
-          {s()?.semantic_index?.status === "loading" &&
-            s()?.semantic_index?.entries_total != null &&
-            s()!.semantic_index.entries_total! > 0 && (
+          {prefs().sections.searchIndex && (
+            <>
+              <SectionHeader theme={props.theme} title="Search Index" />
               <StatRow
                 theme={props.theme}
-                label="Progress"
-                value={`${formatCount(s()!.semantic_index.entries_done)} / ${formatCount(
-                  s()!.semantic_index.entries_total,
-                )}`}
-                tone="warn"
+                label="Status"
+                value={searchStatus().label}
+                tone={searchStatus().tone}
               />
-            )}
-          {(s()?.semantic_index?.entries ?? null) != null && (
-            <StatRow
-              theme={props.theme}
-              label="Entries"
-              value={formatCount(s()!.semantic_index.entries)}
-              tone="muted"
-            />
+              {(s()?.search_index?.files ?? null) != null && (
+                <StatRow
+                  theme={props.theme}
+                  label="Files"
+                  value={formatCount(s()!.search_index.files)}
+                  tone="muted"
+                />
+              )}
+              <StatRow
+                theme={props.theme}
+                label="Disk"
+                value={formatBytes(trigramBytes())}
+                tone="muted"
+              />
+            </>
           )}
-          <StatRow
-            theme={props.theme}
-            label="Disk"
-            value={formatBytes(semanticBytes())}
-            tone="muted"
-          />
+
+          {prefs().sections.semanticIndex && (
+            <>
+              <SectionHeader theme={props.theme} title="Semantic Index" />
+              <StatRow
+                theme={props.theme}
+                label="Status"
+                value={semanticStatus().label}
+                tone={semanticStatus().tone}
+              />
+              {semanticRefreshing() && (
+                <box width="100%">
+                  <text fg={props.theme.textMuted}>{semanticRefreshing()}</text>
+                </box>
+              )}
+              {/* When loading, magic-context-style progress hint helps users see
+          background work is making progress instead of stuck. */}
+              {s()?.semantic_index?.status === "loading" &&
+                s()?.semantic_index?.entries_total != null &&
+                s()!.semantic_index.entries_total! > 0 && (
+                  <StatRow
+                    theme={props.theme}
+                    label="Progress"
+                    value={`${formatCount(s()!.semantic_index.entries_done)} / ${formatCount(
+                      s()!.semantic_index.entries_total,
+                    )}`}
+                    tone="warn"
+                  />
+                )}
+              {(s()?.semantic_index?.entries ?? null) != null && (
+                <StatRow
+                  theme={props.theme}
+                  label="Entries"
+                  value={formatCount(s()!.semantic_index.entries)}
+                  tone="muted"
+                />
+              )}
+              <StatRow
+                theme={props.theme}
+                label="Disk"
+                value={formatBytes(semanticBytes())}
+                tone="muted"
+              />
+            </>
+          )}
 
           {/* Code Health — the agent status-bar glance, surfaced for users.
           Hidden until the Tier-2 cache is populated (status_bar undefined),
@@ -724,7 +765,7 @@ const SidebarContent = (props: {
           diagnostics; D/U/C/T come from the last background scan. A `~` on
           the section header flags the Tier-2 counts as predating the latest
           edit. */}
-          {statusBar() && (
+          {prefs().sections.codeHealth && statusBar() && (
             <>
               <SectionHeader
                 theme={props.theme}
@@ -774,7 +815,7 @@ const SidebarContent = (props: {
           subheader followed by two StatRows (Tokens Saved, Compression
           Ratio). Keeps numbers right-aligned in the value column instead
           of jamming them after the label on the same line. */}
-          {compressionRows().length > 0 && (
+          {prefs().sections.compression && compressionRows().length > 0 && (
             <>
               <SectionHeader theme={props.theme} title="Compression" />
               {compressionRows().map((row) =>
@@ -802,12 +843,17 @@ const SidebarContent = (props: {
   );
 };
 
-export function createAftSidebarSlot(api: TuiPluginApi, pluginVersion: string): TuiSlotPlugin {
+export async function createAftSidebarSlot(
+  api: TuiPluginApi,
+  pluginVersion: string,
+): Promise<TuiSlotPlugin> {
+  const root = await readTuiPreferencesFile();
+  const order = computeEffectiveOrder(root, PLUGIN_KEY, DEFAULT_SLOT_ORDER);
   return {
-    // 150 matches magic-context's order — chosen so AFT renders below
-    // higher-priority panels but above default plugin slots. If both
-    // plugins are loaded together, magic-context will appear first.
-    order: 160,
+    // DEFAULT_SLOT_ORDER (180) is AFT's coordinated default in the shared
+    // tui-preferences ladder (anthropic-auth 160, AFT 180, magic-context 200).
+    // Override via `order` or `forceToTop` in tui-preferences.jsonc.
+    order,
     slots: {
       sidebar_content: (ctx, value) => {
         const theme = createMemo(() => (ctx as any).theme.current);
