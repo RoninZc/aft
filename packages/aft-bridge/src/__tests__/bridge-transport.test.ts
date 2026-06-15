@@ -274,6 +274,70 @@ process.stdin.on("data", (chunk) => {
     }
   });
 
+  test("passive status polls never kill the bridge, even past the hang threshold (#117)", async () => {
+    // Mock a busy bridge: it answers `sibling` but NEVER answers `status`
+    // (status queues behind real work and times out). With the DEFAULT hang
+    // threshold of 2, two un-flagged timeouts would normally SIGKILL the bridge
+    // — issue #117, where sidebar status polls killed the bridge mid-Edit and
+    // aborted the user's queued request. `status` is now bridge-side passive:
+    // it must keep the bridge warm no matter how many polls time out, and never
+    // need an explicit keepBridgeOnTimeout from the caller.
+    const script = writeExecutable(
+      "busy-status.js",
+      `#!/usr/bin/env node
+process.stdin.setEncoding("utf8");
+let buffer = "";
+function writeFrame(frame) {
+  process.stdout.write(JSON.stringify(frame) + "\\n");
+}
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  let newline;
+  while ((newline = buffer.indexOf("\\n")) !== -1) {
+    const line = buffer.slice(0, newline);
+    buffer = buffer.slice(newline + 1);
+    const req = JSON.parse(line);
+    if (req.command === "configure") {
+      writeFrame({ id: req.id, success: true, warnings: [] });
+    } else if (req.command === "sibling") {
+      setTimeout(() => writeFrame({ id: req.id, success: true, command: req.command }), 30);
+    }
+    // status: deliberately never answered (simulates a busy bridge).
+  }
+});
+`,
+    );
+    // Default threshold (2) + small timeout so the test is fast. Passive caps
+    // status at min(80, 5000) = 80ms.
+    const bridge = new BinaryBridge(script, workDir, { timeoutMs: 80, maxRestarts: 0 });
+
+    try {
+      await bridge.send("configure", { project_root: workDir }, { timeoutMs: 5_000 });
+
+      // Five consecutive status timeouts — far past the threshold of 2. None
+      // may kill the bridge, and the caller passes NO keepBridgeOnTimeout.
+      for (let i = 0; i < 5; i++) {
+        const msg = await bridge.send("status", { session_id: "s" }).then(
+          () => "resolved",
+          (err) => String(err instanceof Error ? err.message : err),
+        );
+        expect(msg).toContain("timed out");
+        expect(msg).not.toContain("restarting");
+        expect(bridge.isAlive()).toBe(true);
+      }
+
+      // The bridge is still the SAME live process and serves real work.
+      const sibling = await bridge.send("sibling", {}, { timeoutMs: 500 }).then(
+        (r) => String(r.command),
+        (err) => String(err instanceof Error ? err.message : err),
+      );
+      expect(sibling).toBe("sibling");
+      expect(bridge.isAlive()).toBe(true);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   test("custom timeoutMs is used as default per-request transport budget", async () => {
     const script = writeExecutable(
       "slow-ping.js",

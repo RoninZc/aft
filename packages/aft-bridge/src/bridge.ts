@@ -4,7 +4,11 @@ import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 import { error, getActiveLogger, getLogFilePath, log, warn } from "./active-logger.js";
-import { LONG_RUNNING_COMMAND_TIMEOUT_MS } from "./command-timeouts.js";
+import {
+  isPassiveCommand,
+  LONG_RUNNING_COMMAND_TIMEOUT_MS,
+  PASSIVE_COMMAND_TIMEOUT_MS,
+} from "./command-timeouts.js";
 import type { Logger, LogMeta } from "./logger.js";
 import type { BgCompletion, StatusCompression } from "./protocol.js";
 import { parseStatusBarCounts, type StatusBarCounts } from "./status-bar.js";
@@ -582,8 +586,14 @@ export class BinaryBridge {
       // Per-op timeout override: tool wrappers can pass longer budgets for
       // commands that legitimately need them (callers, trace_to, grep on big
       // repos). Defaults to the bridge-wide timeout otherwise.
-      const effectiveTimeoutMs =
-        options?.transportTimeoutMs ?? options?.timeoutMs ?? this.timeoutMs;
+      // Passive health-check polls (status) get a short budget so they fall
+      // back to the cached snapshot fast instead of blocking the full 30s
+      // behind legitimate work. An explicit shorter override still wins.
+      const passive = isPassiveCommand(command);
+      const resolvedTimeoutMs = options?.transportTimeoutMs ?? options?.timeoutMs ?? this.timeoutMs;
+      const effectiveTimeoutMs = passive
+        ? Math.min(resolvedTimeoutMs, PASSIVE_COMMAND_TIMEOUT_MS)
+        : resolvedTimeoutMs;
       const implicitTransportOptions: SendOptions = {
         ...(options?.transportTimeoutMs !== undefined || options?.timeoutMs !== undefined
           ? { transportTimeoutMs: effectiveTimeoutMs }
@@ -673,7 +683,12 @@ export class BinaryBridge {
       }
       const line = `${JSON.stringify(request)}\n`;
 
-      const keepBridgeOnTimeout = options?.keepBridgeOnTimeout === true;
+      // Passive polls NEVER count toward hang escalation regardless of caller:
+      // a queued status poll timing out means the bridge is BUSY, not hung, and
+      // killing it would abort the user's in-flight request waiting on the same
+      // work (issue #117). This is enforced bridge-side so no call site can
+      // forget it.
+      const keepBridgeOnTimeout = passive || options?.keepBridgeOnTimeout === true;
       let requestSentAt = Date.now();
 
       const response = await new Promise<Record<string, unknown>>((resolve, reject) => {
