@@ -132,6 +132,36 @@ fn search_pending_replay_skips_file_that_becomes_ignored() {
         thread::sleep(Duration::from_millis(50));
     }
 
+    // Drain the edit-triggered refresh to a STABLE Ready state before writing
+    // the ignore rule. Otherwise a lingering edit refresh (FSEvents is async and
+    // throttled on a loaded macOS runner) can leave index_status != "Ready" when
+    // the ignore loop below starts, prematurely setting `saw_ignore_refresh` from
+    // the EDIT refresh rather than the ignore refresh. The loop would then fire
+    // the `total_matches == 0` assertion the moment the index settles — while the
+    // ignore rule has not been applied yet and the secret edit is still
+    // (correctly) indexed — producing a false failure. Requiring several
+    // consecutive Ready polls makes any later non-Ready attributable to the
+    // .aftignore write, so the regression assertion only runs once the ignore
+    // refresh has genuinely occurred.
+    let mut consecutive_ready = 0;
+    let stabilize_deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < stabilize_deadline {
+        let response = grep_marker(&mut aft, "pending_ignore_after_marker");
+        assert_eq!(
+            response["success"], true,
+            "grep should succeed: {response:?}"
+        );
+        if response["index_status"] == "Ready" {
+            consecutive_ready += 1;
+            if consecutive_ready >= 3 {
+                break;
+            }
+        } else {
+            consecutive_ready = 0;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
     fs::write(&aftignore, "src/secret.rs\n").expect("ignore secret");
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut last_response = None;
