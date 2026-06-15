@@ -196,6 +196,19 @@ fi
 echo "→ Running pre-release checks..."
 echo ""
 
+# Fast static checks FIRST — they take seconds and catch the cheap mistakes
+# (lint/format/types) that otherwise only surface AFTER the ~15min cargo test
+# + docker e2e have already run. Fail fast on the cheap stuff.
+echo "  bun lint..."
+bun run lint 2>&1 || { echo "Error: Lint failed"; exit 1; }
+
+echo "  bun typecheck..."
+bun run typecheck 2>&1 || { echo "Error: Typecheck failed"; exit 1; }
+
+echo "  cargo fmt --check..."
+cargo fmt --check 2>&1 || { echo "Error: cargo fmt --check failed (run 'cargo fmt')"; exit 1; }
+
+# Slow checks AFTER the fast ones pass.
 if [ "${SKIP_RUST_TESTS:-}" = "1" ]; then
   echo "  (skipping local cargo tests — SKIP_RUST_TESTS=1)"
   echo "  ↳ CI still runs the full suite on its own runners before publishing."
@@ -203,12 +216,6 @@ else
   echo "  cargo test..."
   cargo test --quiet 2>&1 || { echo "Error: Rust tests failed"; exit 1; }
 fi
-
-echo "  bun lint..."
-bun run lint 2>&1 || { echo "Error: Lint failed"; exit 1; }
-
-echo "  bun typecheck..."
-bun run typecheck 2>&1 || { echo "Error: Typecheck failed"; exit 1; }
 
 if [ "${SKIP_JS_TESTS:-}" = "1" ]; then
   echo "  (skipping plugin tests — SKIP_JS_TESTS=1)"
