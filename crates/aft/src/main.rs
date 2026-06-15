@@ -1176,32 +1176,35 @@ fn refresh_project_corpus(ctx: &AppContext, reason: &str, invalidate_ignore_path
     }
 
     if !ctx.is_worktree_bridge() {
-        if let Some(store) = ctx.callgraph_store().borrow_mut().as_mut() {
-            let current_files = aft::callgraph::walk_project_files(&root).collect::<Vec<_>>();
-            match store.refresh_corpus(&current_files) {
-                Ok(stats) => {
-                    aft::slog_info!(
-                        "callgraph store corpus refresh after {}: {} files, {} edges",
-                        reason,
-                        stats.files,
-                        stats.edges
-                    );
-                    status_changed = true;
-                }
-                Err(error) => {
-                    aft::slog_warn!(
-                        "callgraph store corpus refresh after {} failed: {}",
-                        reason,
-                        error
-                    );
-                    if let Err(mark_error) = store.mark_files_stale(&current_files) {
-                        aft::slog_warn!(
-                            "failed to mark callgraph store corpus stale after refresh failure: {}",
-                            mark_error
-                        );
-                    }
-                }
-            }
+        // Do NOT cold-build the callgraph store synchronously here. This function
+        // runs on the single-threaded dispatch loop from `drain_watcher_events`,
+        // which fires before EVERY request (and on idle ticks). A full O(repo)
+        // `refresh_corpus` (= `cold_build`: parse all files + resolve refs +
+        // rewrite SQLite) blocks ALL queued requests — including `configure` and
+        // `bash` — for its entire duration, which exceeds the 30s transport
+        // timeout on a large repo. On a long-lived bridge (OpenCode Desktop) an
+        // FSEvents overflow triggers this drain, so the user sees configure/bash
+        // time out (regression: the watcher-overflow path that calls this is new
+        // in 0.39.1; the ignore-rule path that also calls this had the same
+        // latent inline block, just rarely triggered).
+        //
+        // Instead, drop the resident store and force a BACKGROUND rebuild: the
+        // next `callgraph_store_for_ops()` spawns the cold build off-thread and
+        // returns `Building` (callgraph ops + dead_code projection already handle
+        // `Building`/unavailable gracefully). This mirrors the search/semantic
+        // refreshes below, which are already async. A build already in flight
+        // keeps running; the resident drop + force flag make the next op converge
+        // to a fresh full rebuild.
+        // Mirror the original "act only when the callgraph is actually loaded or
+        // building" guard, but reschedule instead of inline-building.
+        if ctx.callgraph_store().borrow().is_some() || ctx.callgraph_store_rx().borrow().is_some() {
+            *ctx.callgraph_store().borrow_mut() = None;
+            ctx.mark_callgraph_store_force_rebuild();
+            status_changed = true;
+            aft::slog_info!(
+                "callgraph store scheduled for background rebuild after {}",
+                reason
+            );
         }
     }
 
@@ -2736,6 +2739,60 @@ mod watcher_filter_tests {
             assert!(ctx.semantic_refresh_event_rx().borrow().is_none());
             assert_eq!(ctx.semantic_index_status().borrow().refreshing_count(), 0);
         });
+    }
+
+    #[test]
+    fn watcher_overflow_rescan_reschedules_callgraph_store_instead_of_blocking() {
+        // Regression for the configure/bash timeout on OpenCode Desktop large
+        // repos (v0.39.1): a watcher overflow (RescanRequired) used to run the
+        // callgraph store's full cold_build SYNCHRONOUSLY inside
+        // drain_watcher_events — which runs on the single dispatch thread before
+        // every request — blocking configure/bash past the 30s transport
+        // timeout. The drain must now DROP the resident store and schedule a
+        // BACKGROUND rebuild, never cold-build inline.
+        let tmp = TempDir::new().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::write(root.join("lib.rs"), "fn used() {}\nfn main() { used(); }\n").unwrap();
+
+        let ctx = AppContext::new(
+            Box::new(TreeSitterProvider::new()),
+            Config {
+                project_root: Some(root.clone()),
+                storage_dir: Some(tmp.path().join("storage")),
+                callgraph_store: true,
+                ..Config::default()
+            },
+        );
+        ctx.set_canonical_cache_root(root.clone());
+        ctx.rebuild_gitignore();
+
+        // Make a callgraph store resident (synchronous build of the 1-file repo).
+        let resident = ctx
+            .ensure_callgraph_store()
+            .expect("ensure callgraph store");
+        assert!(resident.is_some(), "callgraph store should be resident");
+        drop(resident);
+        assert!(ctx.callgraph_store().borrow().is_some());
+
+        let watcher_tx = install_watcher_rx(&ctx);
+        watcher_tx
+            .send(WatcherDispatchEvent::RescanRequired)
+            .unwrap();
+
+        drain_watcher_events(&ctx);
+
+        // The resident store is dropped (rescheduled), NOT refreshed in place...
+        assert!(
+            ctx.callgraph_store().borrow().is_none(),
+            "watcher overflow must drop the resident store to reschedule, not refresh inline"
+        );
+        // ...and the drain itself did NOT spawn a build (no inline cold_build on
+        // the dispatch thread); the rebuild happens lazily on the next op.
+        assert!(
+            ctx.callgraph_store_rx().borrow().is_none(),
+            "drain must not start a synchronous/inline callgraph build"
+        );
+        // The next callgraph op will see the force flag and background-build.
     }
 
     #[test]
